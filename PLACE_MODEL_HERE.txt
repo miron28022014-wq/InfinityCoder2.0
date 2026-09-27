@@ -1,0 +1,1 @@
+Положи сюда qwen-coder.gguf (см. AMD_SETUP.md, раздел 3).

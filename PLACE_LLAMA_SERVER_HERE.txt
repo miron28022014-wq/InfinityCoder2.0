@@ -1,0 +1,1 @@
+Положи сюда llama-server-vulkan.exe (см. AMD_SETUP.md, раздел 2).
