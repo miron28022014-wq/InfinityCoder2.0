@@ -148,30 +148,36 @@ jobs:
             Write-Host ("  {0} bytes  {1}" -f $_.Length, $_.FullName)
           }
 
-          $server = $serverCandidates |
-            Where-Object { $_.Length -ge 128KB } |
-            Select-Object -First 1
-
-          if (-not $server) {
-            $sizes = ($serverCandidates | ForEach-Object { "$($_.Length) bytes: $($_.FullName)" }) -join "; "
-            throw "No usable llama-server.exe was found. Candidates: $sizes"
-          }
-
+          $server = $serverCandidates | Select-Object -First 1
           Copy-Item $server.FullName "src-tauri\bin\llama-server-vulkan.exe" -Force
 
-          Get-ChildItem $dir -Recurse -File -Filter "*.dll" |
-            ForEach-Object { Copy-Item $_.FullName "src-tauri\bin" -Force }
-
+          # The current official Vulkan bundle may ship llama-server.exe as a
+          # very small PE launcher with the implementation in adjacent DLLs.
+          # Validate it as PE instead of imposing an arbitrary file-size limit.
           $binary = Get-Item "src-tauri\bin\llama-server-vulkan.exe"
           $header = [System.IO.File]::ReadAllBytes($binary.FullName)
           if ($header.Length -lt 2 -or $header[0] -ne 0x4D -or $header[1] -ne 0x5A) {
             throw "llama-server-vulkan.exe is not a valid Windows PE executable."
           }
 
+          # Preserve all executable/runtime DLLs from the official package.
+          Get-ChildItem $dir -Recurse -File |
+            Where-Object { $_.Extension -in @(".dll", ".exe") } |
+            ForEach-Object {
+              if ($_.Name -ne "llama-server.exe") {
+                Copy-Item $_.FullName "src-tauri\bin\$($_.Name)" -Force
+              }
+            }
+
           $dlls = @(Get-ChildItem "src-tauri\bin" -File -Filter "*.dll")
           if ($dlls.Count -eq 0) {
             throw "No llama.cpp runtime DLLs were copied."
           }
+
+          Write-Host "Bundled llama runtime files:"
+          Get-ChildItem "src-tauri\bin" -File |
+            Sort-Object Name |
+            ForEach-Object { Write-Host ("  {0} bytes  {1}" -f $_.Length, $_.Name) }
 
           Write-Host "llama-server: $($binary.Length) bytes"
           Write-Host "Runtime DLL count: $($dlls.Count)"
