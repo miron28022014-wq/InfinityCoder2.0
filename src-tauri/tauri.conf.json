@@ -19,12 +19,19 @@
         "minHeight": 700
       }
     ],
-    "security": { "csp": null }
+    "security": {
+      "csp": null
+    }
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
-    "resources": ["bin/"],
+    "targets": [
+      "nsis"
+    ],
+    "resources": [
+      "bin/",
+      "resources/"
+    ],
     "windows": {
       "nsis": {
         "installerHooks": "./windows/hooks.nsh"
