@@ -98,6 +98,22 @@ fn ledger_init(root: &Path) -> Result<(), String> {
     ).map_err(|e| e.to_string())?;
     c.execute("CREATE INDEX IF NOT EXISTS idx_ledger_tokens_token ON ledger_tokens(token)", [])
         .map_err(|e| e.to_string())?;
+
+    // One-time migration for Ledger databases created by the previous build.
+    let token_count: i64 = c.query_row("SELECT COUNT(*) FROM ledger_tokens", [], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    if token_count == 0 {
+        let existing: Vec<(String, String, String)> = {
+            let mut s = c.prepare("SELECT key,description,file_path FROM ledger").map_err(|e| e.to_string())?;
+            s.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .map_err(|e| e.to_string())?
+                .filter_map(Result::ok)
+                .collect()
+        };
+        for (key, description, file_path) in existing {
+            upsert_tokens(&c, &key, &format!("{} {} {}", description, file_path, key))?;
+        }
+    }
     Ok(())
 }
 
@@ -135,6 +151,9 @@ fn upsert_tokens(c: &Connection, key: &str, text: &str) -> Result<(), String> {
 
 fn declaration(line: &str) -> Option<(&'static str, &str)> {
     let t = line.trim();
+    // Declarations may be nested inside functions; search for common declaration
+    // markers instead of requiring them to start at column zero.
+    let t = t.strip_prefix("export ").unwrap_or(t);
     for (prefix, kind) in [
         ("fn ", "function"), ("function ", "function"), ("def ", "function"),
         ("class ", "class"), ("interface ", "interface"), ("struct ", "struct"),
