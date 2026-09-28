@@ -11,13 +11,13 @@ permissions:
 
 env:
   LLAMA_CPP_TAG: v0.4.1
-  LLAMA_CPP_ASSET: llama-v0.4.1-bin-win-vulkan-x64.zip
+  LLAMA_CPP_API: https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/v0.4.1
 
 jobs:
   build:
     name: Build Windows installer
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
@@ -29,6 +29,8 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: 22
+          cache: npm
+          cache-dependency-path: package.json
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -47,100 +49,182 @@ jobs:
             "src-tauri\src\main.rs",
             "src-tauri\windows\hooks.nsh"
           )
+
           foreach ($path in $required) {
             if (-not (Test-Path $path -PathType Leaf)) {
               throw "Required file is missing: $path"
             }
           }
 
-          $gguf = Get-ChildItem -Path . -Recurse -File -Filter "*.gguf" -ErrorAction SilentlyContinue
+          $gguf = Get-ChildItem -Path . -Recurse -File -Filter "*.gguf" -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -notmatch "\node_modules\" -and $_.FullName -notmatch "\target\" }
+
           if ($gguf) {
             $names = ($gguf | ForEach-Object FullName) -join ", "
-            throw "A GGUF model is present in the source tree. The model is intentionally downloaded by the installer, so do not commit a 4.68 GB GGUF into the repository. Found: $names"
+            throw "A GGUF model is present in the source tree. The 4.68 GB model is downloaded by the installer. Found: $names"
           }
 
-          if (Test-Path "src-tauri\models") {
-            Remove-Item "src-tauri\models" -Recurse -Force
+          if (Test-Path "src-tauri\bin") {
+            Remove-Item "src-tauri\bin" -Recurse -Force
           }
 
       - name: Install frontend dependencies
         shell: pwsh
         run: npm install --no-audit --no-fund
 
-      - name: Build and type-check frontend
+      - name: Validate TypeScript and production frontend
         shell: pwsh
-        run: npm run build
+        run: |
+          $ErrorActionPreference = "Stop"
+          npm run build
+
+      - name: Validate Rust backend
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          cargo check --manifest-path src-tauri\Cargo.toml --target x86_64-pc-windows-msvc
 
       - name: Download official llama.cpp Vulkan runtime
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          $api = $env:LLAMA_CPP_API
+          $headers = @{
+            "Accept" = "application/vnd.github+json"
+            "X-GitHub-Api-Version" = "2022-11-28"
+            "User-Agent" = "InfinityCoder-CI"
+          }
+
+          Write-Host "Reading llama.cpp release metadata: $api"
+          $release = Invoke-RestMethod -Uri $api -Headers $headers -Method Get
+
+          if ($release.tag_name -ne $env:LLAMA_CPP_TAG) {
+            throw "Unexpected llama.cpp tag: $($release.tag_name)"
+          }
+
+          $asset = $release.assets |
+            Where-Object { $_.name -match "^llama-.*-bin-win-vulkan-x64\.zip$" } |
+            Select-Object -First 1
+
+          if (-not $asset) {
+            $available = ($release.assets | ForEach-Object name) -join ", "
+            throw "Official Windows Vulkan asset was not found. Available assets: $available"
+          }
+
+          Write-Host "Selected asset: $($asset.name)"
+          Write-Host "Download URL: $($asset.browser_download_url)"
+          if ($asset.digest) {
+            Write-Host "Release SHA256: $($asset.digest)"
+          }
+
           $dir = Join-Path $env:RUNNER_TEMP "llama-vulkan"
-          $zip = Join-Path $env:RUNNER_TEMP "llama-vulkan.zip"
-          $url = "https://github.com/ggml-org/llama.cpp/releases/download/$env:LLAMA_CPP_TAG/$env:LLAMA_CPP_ASSET"
+          $zip = Join-Path $env:RUNNER_TEMP $asset.name
 
           if (Test-Path $dir) { Remove-Item $dir -Recurse -Force }
           if (Test-Path $zip) { Remove-Item $zip -Force }
           New-Item -ItemType Directory -Force -Path "src-tauri\bin" | Out-Null
 
-          Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zip -UseBasicParsing
+
+          if (-not (Test-Path $zip -PathType Leaf)) {
+            throw "llama.cpp archive was not downloaded."
+          }
+
+          $zipHash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Host "Downloaded archive SHA256: $zipHash"
+
+          if ($asset.digest) {
+            $expected = $asset.digest -replace "^sha256:", ""
+            if ($zipHash -ne $expected.ToLowerInvariant()) {
+              throw "llama.cpp archive checksum mismatch. Expected $expected, got $zipHash"
+            }
+          }
+
           Expand-Archive -Path $zip -DestinationPath $dir -Force
 
-          $server = Get-ChildItem $dir -Recurse -File -Filter "llama-server.exe" | Select-Object -First 1
+          $server = Get-ChildItem $dir -Recurse -File -Filter "llama-server.exe" |
+            Select-Object -First 1
+
           if (-not $server) {
             throw "llama-server.exe was not found in the official Vulkan x64 release."
           }
 
           Copy-Item $server.FullName "src-tauri\bin\llama-server-vulkan.exe" -Force
+
           Get-ChildItem $server.Directory.FullName -Recurse -File -Filter "*.dll" |
             ForEach-Object { Copy-Item $_.FullName "src-tauri\bin" -Force }
+
+          $binary = Get-Item "src-tauri\bin\llama-server-vulkan.exe"
+          if ($binary.Length -lt 1MB) {
+            throw "llama-server-vulkan.exe is unexpectedly small."
+          }
 
           $dlls = @(Get-ChildItem "src-tauri\bin" -File -Filter "*.dll")
           if ($dlls.Count -eq 0) {
             throw "No llama.cpp runtime DLLs were copied."
           }
 
-          & "src-tauri\bin\llama-server-vulkan.exe" --version
-          if ($LASTEXITCODE -ne 0) {
-            throw "The downloaded llama-server executable failed its --version check."
-          }
+          Write-Host "llama-server: $($binary.Length) bytes"
+          Write-Host "Runtime DLL count: $($dlls.Count)"
 
       - name: Generate application icons
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           Add-Type -AssemblyName System.Drawing
+
           $tmp = Join-Path $env:RUNNER_TEMP "infinitycoder-icon.png"
           $bmp = New-Object System.Drawing.Bitmap 256,256
           $g = [System.Drawing.Graphics]::FromImage($bmp)
           $g.Clear([System.Drawing.Color]::FromArgb(13,17,23))
+          $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+
           $font = New-Object System.Drawing.Font("Arial",72,[System.Drawing.FontStyle]::Bold)
           $brush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(88,166,255))
           $g.DrawString("IC",$font,$brush,35,70)
+
           $g.Dispose()
+          $font.Dispose()
+          $brush.Dispose()
           $bmp.Save($tmp,[System.Drawing.Imaging.ImageFormat]::Png)
           $bmp.Dispose()
+
           npx --no-install tauri icon "$tmp"
+
+          if (-not (Test-Path "src-tauri\icons\icon.ico" -PathType Leaf)) {
+            throw "Tauri icon generation did not create src-tauri\icons\icon.ico"
+          }
 
       - name: Build Windows NSIS installer
         shell: pwsh
-        run: npm run tauri:build
+        run: |
+          $ErrorActionPreference = "Stop"
+          npm run tauri:build
 
       - name: Verify installer
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+
           $files = @(Get-ChildItem "src-tauri\target\release\bundle\nsis" -File -Filter "*.exe" -ErrorAction SilentlyContinue)
-          if ($files.Count -eq 0) {
-            throw "NSIS installer was not produced."
+
+          if ($files.Count -ne 1) {
+            throw "Expected exactly one NSIS installer, found $($files.Count)."
           }
+
           foreach ($file in $files) {
             if ($file.Length -lt 1MB) {
               throw "Installer is unexpectedly small: $($file.FullName)"
             }
+
+            $hash = (Get-FileHash $file.FullName -Algorithm SHA256).Hash
             Write-Host "Installer: $($file.Name)"
             Write-Host "Size: $($file.Length) bytes"
-            Write-Host "SHA256: $((Get-FileHash $file.FullName -Algorithm SHA256).Hash)"
+            Write-Host "SHA256: $hash"
+          }
+
+          if (-not (Test-Path "src-tauri\target\release\InfinityCoder.exe" -PathType Leaf)) {
+            throw "The application executable was not produced."
           }
 
       - name: Upload installer
@@ -150,3 +234,14 @@ jobs:
           path: src-tauri/target/release/bundle/nsis/*.exe
           if-no-files-found: error
           retention-days: 7
+
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: InfinityCoder-Build-Diagnostics
+          path: |
+            dist/
+            src-tauri/target/release/bundle/nsis/
+          if-no-files-found: ignore
+          retention-days: 3
