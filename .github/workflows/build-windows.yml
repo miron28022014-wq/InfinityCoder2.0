@@ -78,12 +78,6 @@ jobs:
           $ErrorActionPreference = "Stop"
           npm run build
 
-      - name: Validate Rust backend
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          cargo check --manifest-path src-tauri\Cargo.toml --target x86_64-pc-windows-msvc
-
       - name: Download official llama.cpp Vulkan runtime
         shell: pwsh
         run: |
@@ -166,6 +160,12 @@ jobs:
 
           Write-Host "llama-server: $($binary.Length) bytes"
           Write-Host "Runtime DLL count: $($dlls.Count)"
+
+      - name: Validate Rust backend
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          cargo check --manifest-path src-tauri\Cargo.toml --target x86_64-pc-windows-msvc
 
       - name: Generate application icons
         shell: pwsh
