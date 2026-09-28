@@ -3,10 +3,11 @@ name: Build InfinityCoder Windows
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
-    tags:
-      - "v*"
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -19,6 +20,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
+          package-manager-cache: false
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -28,23 +30,31 @@ jobs:
       - name: Download Vulkan llama.cpp runtime
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path bin | Out-Null
+          New-Item -ItemType Directory -Force -Path src-tauri\bin | Out-Null
           $url = "https://github.com/Caerleus/llama.cpp-vulkan-win/releases/latest/download/llama-vulkan-windows.zip"
           Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\llama-vulkan.zip"
           Expand-Archive "$env:RUNNER_TEMP\llama-vulkan.zip" "$env:RUNNER_TEMP\llama-vulkan" -Force
           $server = Get-ChildItem "$env:RUNNER_TEMP\llama-vulkan" -Recurse -Filter "llama-server.exe" | Select-Object -First 1
           if (-not $server) { throw "llama-server.exe was not found in the Vulkan package." }
-          Copy-Item $server.FullName "bin\llama-server-vulkan.exe" -Force
+          Copy-Item $server.FullName "src-tauri\bin\llama-server-vulkan.exe" -Force
+          if (-not (Test-Path "src-tauri\bin\llama-server-vulkan.exe")) { throw "Runtime copy failed." }
 
       - name: Download Qwen 2.5 Coder Q4_K_M
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path models | Out-Null
+          New-Item -ItemType Directory -Force -Path src-tauri\models | Out-Null
           $url = "https://huggingface.co/second-state/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/main/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf?download=true"
-          Invoke-WebRequest -Uri $url -OutFile "models\qwen-coder.gguf"
+          Invoke-WebRequest -Uri $url -OutFile "src-tauri\models\qwen-coder.gguf"
+          if (-not (Test-Path "src-tauri\models\qwen-coder.gguf")) { throw "Model download failed." }
 
       - name: Install dependencies
         run: npm install
+
+      - name: Verify Tauri resources
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "src-tauri\bin\llama-server-vulkan.exe")) { throw "Missing llama-server resource." }
+          if (-not (Test-Path "src-tauri\models\qwen-coder.gguf")) { throw "Missing Qwen resource." }
 
       - name: Build Windows installer
         run: npm run tauri:build
