@@ -314,7 +314,7 @@ fn start_ai(resource_dir: &Path, app_data_dir: &Path, state: &AppState) -> Resul
             "-n", "-1",
             "--host", AI_HOST,
             "--port", &AI_PORT.to_string(),
-            "--vulkan-device", "0",
+            "--device", "Vulkan0",
             "--alias", "qwen-coder",
         ])
         .stdin(Stdio::null())
@@ -337,6 +337,16 @@ fn start_ai_background(resource_dir: PathBuf, app_data_dir: PathBuf, state: AppS
         }
 
         for _ in 0..240 {
+            if let Ok(mut guard) = state.ai_process.lock() {
+                if let Some(child) = guard.as_mut() {
+                    if let Ok(Some(status)) = child.try_wait() {
+                        if let Ok(mut s) = state.ai_status.lock() {
+                            *s = format!("error:llama-server exited with {status}");
+                        }
+                        return;
+                    }
+                }
+            }
             if http_health() {
                 if let Ok(mut s) = state.ai_status.lock() {
                     *s = "ready".into();
@@ -395,7 +405,7 @@ fn list_dir(workspace_root: String, path: String) -> Result<Vec<FileItem>, Strin
 }
 
 #[tauri::command]
-fn read_file(workspace_root: String, path: String, state: State<AppState>) -> Result<String, String> {
+fn read_file(workspace_root: String, path: String, _state: State<AppState>) -> Result<String, String> {
     let root = Path::new(&workspace_root).canonicalize().map_err(|e| e.to_string())?;
     let p = scoped(&root, &path)?;
     let content = fs::read_to_string(&p).map_err(|e| e.to_string())?;
