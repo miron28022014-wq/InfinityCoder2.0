@@ -415,6 +415,10 @@ fn write_file(workspace_root: String, path: String, content: String, state: Stat
     }
     let tmp = p.with_extension(format!("{}.infinitycoder.tmp", p.extension().and_then(|x| x.to_str()).unwrap_or("file")));
     fs::write(&tmp, content.as_bytes()).map_err(|e| e.to_string())?;
+    // Windows rename does not replace an existing destination.
+    if p.exists() {
+        fs::remove_file(&p).map_err(|e| e.to_string())?;
+    }
     fs::rename(&tmp, &p).map_err(|e| e.to_string())?;
 
     record(state.inner(), "write_file");
