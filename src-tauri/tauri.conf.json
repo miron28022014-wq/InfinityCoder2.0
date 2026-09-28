@@ -24,7 +24,7 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
-    "resources": ["bin/llama-server-vulkan.exe"],
+    "resources": ["bin/"],
     "windows": {
       "nsis": {
         "installerHooks": "./windows/hooks.nsh"
