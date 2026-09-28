@@ -40,8 +40,16 @@ jobs:
           Expand-Archive "$env:RUNNER_TEMP\llama-vulkan.zip" "$env:RUNNER_TEMP\llama-vulkan" -Force
           $server = Get-ChildItem "$env:RUNNER_TEMP\llama-vulkan" -Recurse -Filter "llama-server.exe" | Select-Object -First 1
           if (-not $server) { throw "llama-server.exe was not found in the Vulkan package." }
-          Copy-Item $server.FullName "src-tauri\bin\llama-server-vulkan.exe" -Force
+
+          # Copy the complete native runtime next to the server. The executable
+          # may depend on ggml/llama runtime DLLs shipped in the same package.
+          $runtimeDir = $server.Directory.FullName
+          Copy-Item "$runtimeDir\llama-server.exe" "src-tauri\bin\llama-server-vulkan.exe" -Force
+          Get-ChildItem $runtimeDir -Filter "*.dll" -File | Copy-Item -Destination "src-tauri\bin" -Force
+
           if (-not (Test-Path "src-tauri\bin\llama-server-vulkan.exe")) { throw "llama-server copy failed." }
+          $dlls = Get-ChildItem "src-tauri\bin" -Filter "*.dll" -File
+          if ($dlls.Count -eq 0) { throw "No runtime DLLs were found next to llama-server.exe." }
 
       - name: Verify bundled llama-server resource
         shell: pwsh
@@ -49,6 +57,7 @@ jobs:
           $server = Get-Item "src-tauri\bin\llama-server-vulkan.exe"
           if ($server.Length -lt 1MB) { throw "llama-server file is unexpectedly small." }
           Write-Host "llama-server: $($server.Length) bytes"
+          Write-Host "Runtime DLLs: $((Get-ChildItem "src-tauri\bin" -Filter "*.dll").Count)"
           Write-Host "Qwen model will be downloaded by the Windows installer after installation."
 
       - name: Generate application icons
