@@ -1,1 +1,56 @@
-name: Build InfinityCoder Windows\non:\n  workflow_dispatch:\n  push:\n    tags: ['v*']\njobs:\n  build:\n    runs-on: windows-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:{node-version:20}\n      - uses: dtolnay/rust-toolchain@stable\n      - run: npm install\n      - run: npm run tauri:build\n      - uses: actions/upload-artifact@v4\n        with:\n          name: InfinityCoder-Windows-Installer\n          path: src-tauri/target/release/bundle/nsis/*.exe\n          if-no-files-found: error\n
+name: Build InfinityCoder Windows
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Download Vulkan llama.cpp runtime
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path bin | Out-Null
+          $url = "https://github.com/Caerleus/llama.cpp-vulkan-win/releases/latest/download/llama-vulkan-windows.zip"
+          Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\llama-vulkan.zip"
+          Expand-Archive "$env:RUNNER_TEMP\llama-vulkan.zip" "$env:RUNNER_TEMP\llama-vulkan" -Force
+          $server = Get-ChildItem "$env:RUNNER_TEMP\llama-vulkan" -Recurse -Filter "llama-server.exe" | Select-Object -First 1
+          if (-not $server) { throw "llama-server.exe was not found in the Vulkan package." }
+          Copy-Item $server.FullName "bin\llama-server-vulkan.exe" -Force
+
+      - name: Download Qwen 2.5 Coder Q4_K_M
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path models | Out-Null
+          $url = "https://huggingface.co/second-state/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/main/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf?download=true"
+          Invoke-WebRequest -Uri $url -OutFile "models\qwen-coder.gguf"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build Windows installer
+        run: npm run tauri:build
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: InfinityCoder-Windows-Installer
+          path: src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
