@@ -10,8 +10,8 @@ permissions:
   contents: read
 
 env:
-  LLAMA_CPP_TAG: v0.4.1
-  LLAMA_CPP_API: https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/v0.4.1
+  LLAMA_CPP_TAG: b10982
+  LLAMA_CPP_API: https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/b10982
 
 jobs:
   build:
