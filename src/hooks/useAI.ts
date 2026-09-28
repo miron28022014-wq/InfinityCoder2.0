@@ -6,6 +6,7 @@ type ToolCall = { tool: string; args: Record<string, string> };
 
 const TOOL_NAMES = ["read_file", "write_file", "list_dir", "search_ledger", "update_ledger"];
 const MAX_CONTEXT_MESSAGES = 10;
+const MAX_AGENT_TURNS = 512;
 const MAX_FILE_CONTEXT = 12000;
 const MAX_RECALL_ENTRIES = 8;
 
@@ -89,6 +90,9 @@ export function useAI({
 
     try {
       await waitForAI();
+      // Start a fresh Gatekeeper chain for this user request. Ledger access
+      // performed below will explicitly authorize the next write operation.
+      await invoke("begin_agent_turn");
 
       const initialRecall = await recall(text);
       let history: Msg[] = [...messages, { role: "user", content: text }];
@@ -99,7 +103,8 @@ export function useAI({
           : ""
       ].filter(Boolean).join("\n\n");
 
-      for (let turn = 0; turn < 32; turn++) {
+      const recalled = new Set<string>();
+      for (let turn = 0; turn < MAX_AGENT_TURNS; turn++) {
         const compactHistory = history.length > MAX_CONTEXT_MESSAGES
           ? history.slice(-MAX_CONTEXT_MESSAGES)
           : history;
@@ -136,6 +141,7 @@ export function useAI({
         const decoder = new TextDecoder();
         let pending = "";
         let full = "";
+        let finishReason = "";
 
         while (true) {
           const { value, done } = await reader.read();
@@ -150,7 +156,9 @@ export function useAI({
             if (!data || data === "[DONE]") continue;
             try {
               const json = JSON.parse(data);
-              const delta = json.choices?.[0]?.delta?.content ?? "";
+              const choice = json.choices?.[0];
+              finishReason = choice?.finish_reason ?? finishReason;
+              const delta = choice?.delta?.content ?? "";
               if (delta) {
                 full += delta;
                 onDelta(delta);
@@ -175,17 +183,32 @@ export function useAI({
 
         // Auto-Recall is a real continuation loop: retrieve missing entities and
         // give them to the model on the next turn instead of merely logging them.
-        const ids = identifiers(text + "\n" + full);
+        const ids = identifiers(text + "\n" + full)
+          .filter(id => !recalled.has(id));
         const recallHits: any[] = [];
         for (const id of ids) {
+          recalled.add(id);
           const hits = await recall(id);
           if (hits.length) recallHits.push({ query: id, entries: hits.slice(0, 3) });
         }
 
-        if (recallHits.length && turn < 31) {
+        if (recallHits.length) {
           history.push({
             role: "tool",
             content: "AUTO_RECALL RESULTS:\n" + JSON.stringify(recallHits)
+          });
+          continue;
+        }
+
+        // llama.cpp may stop because the current response reached its
+        // generation budget. Continue from the exact previous response rather
+        // than treating a length stop as a completed task. The outer loop is
+        // deliberately large so very large code tasks can be completed in
+        // deterministic chunks without requiring one giant model response.
+        if (finishReason === "length") {
+          history.push({
+            role: "user",
+            content: "CONTINUE FROM THE EXACT END OF YOUR PREVIOUS RESPONSE. Do not restart, summarize, or repeat completed code. Continue the unfinished work using the Ledger and tools. If a file is being generated, continue in the next deterministic chunk."
           });
           continue;
         }
