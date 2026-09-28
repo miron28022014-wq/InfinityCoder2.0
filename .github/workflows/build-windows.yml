@@ -37,7 +37,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path "src-tauri\bin" | Out-Null
           $headers = @{ "Accept" = "application/vnd.github+json"; "User-Agent" = "InfinityCoder-CI" }
           $release = Invoke-RestMethod -Headers $headers -Uri "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
-          $asset = $release.assets | Where-Object { $_.name -match "bin-win-vulkan-x64\\.zip$" } | Select-Object -First 1
+          $asset = $release.assets | Where-Object { $_.name -match "bin-win-vulkan-x64\.zip$" } | Select-Object -First 1
           if (-not $asset) { throw "Official llama.cpp Windows Vulkan x64 asset was not found." }
           Write-Host "Using llama.cpp asset: $($asset.name)"
           Invoke-WebRequest -Headers @{ "User-Agent" = "InfinityCoder-CI" } -Uri $asset.browser_download_url -OutFile "$env:RUNNER_TEMP\llama-vulkan.zip"
