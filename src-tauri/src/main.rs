@@ -3,7 +3,7 @@
 use rusqlite::{params, Connection};
 use serde::Serialize;
 use std::{fs, path::{Component, Path, PathBuf}, process::{Child, Command, Stdio}, sync::Mutex};
-use tauri::State;
+use tauri::{Manager, State};
 
 struct AppState { workspace: Mutex<Option<PathBuf>>, ai_process: Mutex<Option<Child>>, recent_actions: Mutex<Vec<String>> }
 
