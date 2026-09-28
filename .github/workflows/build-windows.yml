@@ -136,23 +136,33 @@ jobs:
 
           Expand-Archive -Path $zip -DestinationPath $dir -Force
 
-          $server = Get-ChildItem $dir -Recurse -File -Filter "llama-server.exe" |
+          $serverCandidates = @(Get-ChildItem $dir -Recurse -File -Filter "llama-server.exe" |
+            Sort-Object Length -Descending)
+
+          if ($serverCandidates.Count -eq 0) {
+            throw "llama-server.exe was not found in the official Vulkan x64 release."
+          }
+
+          Write-Host "llama-server candidates:"
+          $serverCandidates | ForEach-Object {
+            Write-Host ("  {0} bytes  {1}" -f $_.Length, $_.FullName)
+          }
+
+          $server = $serverCandidates |
+            Where-Object { $_.Length -ge 128KB } |
             Select-Object -First 1
 
           if (-not $server) {
-            throw "llama-server.exe was not found in the official Vulkan x64 release."
+            $sizes = ($serverCandidates | ForEach-Object { "$($_.Length) bytes: $($_.FullName)" }) -join "; "
+            throw "No usable llama-server.exe was found. Candidates: $sizes"
           }
 
           Copy-Item $server.FullName "src-tauri\bin\llama-server-vulkan.exe" -Force
 
-          Get-ChildItem $server.Directory.FullName -Recurse -File -Filter "*.dll" |
+          Get-ChildItem $dir -Recurse -File -Filter "*.dll" |
             ForEach-Object { Copy-Item $_.FullName "src-tauri\bin" -Force }
 
           $binary = Get-Item "src-tauri\bin\llama-server-vulkan.exe"
-          if ($binary.Length -lt 128KB) {
-            throw "llama-server-vulkan.exe is unexpectedly small: $($binary.Length) bytes"
-          }
-
           $header = [System.IO.File]::ReadAllBytes($binary.FullName)
           if ($header.Length -lt 2 -or $header[0] -ne 0x4D -or $header[1] -ne 0x5A) {
             throw "llama-server-vulkan.exe is not a valid Windows PE executable."
