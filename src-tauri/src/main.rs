@@ -23,7 +23,7 @@ struct AppState {
     workspace: Arc<Mutex<Option<PathBuf>>>,
     ai_process: Arc<Mutex<Option<Child>>>,
     ai_status: Arc<Mutex<String>>,
-    recent_actions: Arc<Mutex<Vec<String>>>,
+    ledger_ready: Arc<Mutex<bool>>,
 }
 
 #[derive(Serialize, Clone)]
@@ -64,13 +64,15 @@ fn scoped(root: &Path, user_path: &str) -> Result<PathBuf, String> {
     Ok(canon)
 }
 
-fn record(state: &AppState, action: &str) {
-    if let Ok(mut a) = state.recent_actions.lock() {
-        a.push(action.to_string());
-        if a.len() > 16 {
-            let remove = a.len() - 16;
-            a.drain(0..remove);
-        }
+fn mark_ledger_ready(state: &AppState) {
+    if let Ok(mut ready) = state.ledger_ready.lock() {
+        *ready = true;
+    }
+}
+
+fn reset_agent_turn(state: &AppState) {
+    if let Ok(mut ready) = state.ledger_ready.lock() {
+        *ready = false;
     }
 }
 
@@ -351,6 +353,12 @@ fn start_ai_background(resource_dir: PathBuf, app_data_dir: PathBuf, state: AppS
 }
 
 #[tauri::command]
+fn begin_agent_turn(state: State<AppState>) -> Result<(), String> {
+    reset_agent_turn(state.inner());
+    Ok(())
+}
+
+#[tauri::command]
 fn ai_status(state: State<AppState>) -> Result<String, String> {
     state.ai_status.lock().map(|s| s.clone()).map_err(|_| "AI status lock poisoned".into())
 }
@@ -364,7 +372,7 @@ fn set_workspace_scope(path: String, state: State<AppState>) -> Result<(), Strin
     let p = p.canonicalize().map_err(|e| e.to_string())?;
     ledger_init(&p)?;
     *state.workspace.lock().map_err(|_| "Workspace lock poisoned".to_string())? = Some(p);
-    record(state.inner(), "set_workspace_scope");
+    reset_agent_turn(state.inner());
     Ok(())
 }
 
@@ -391,7 +399,7 @@ fn read_file(workspace_root: String, path: String, state: State<AppState>) -> Re
     let root = Path::new(&workspace_root).canonicalize().map_err(|e| e.to_string())?;
     let p = scoped(&root, &path)?;
     let content = fs::read_to_string(&p).map_err(|e| e.to_string())?;
-    record(state.inner(), "read_file");
+
     Ok(content)
 }
 
@@ -399,10 +407,9 @@ fn read_file(workspace_root: String, path: String, state: State<AppState>) -> Re
 fn write_file(workspace_root: String, path: String, content: String, state: State<AppState>) -> Result<(), String> {
     let root = Path::new(&workspace_root).canonicalize().map_err(|e| e.to_string())?;
     {
-        let actions = state.recent_actions.lock().map_err(|_| "Action history lock poisoned".to_string())?;
-        let allowed = actions.iter().rev().take(3).any(|x| x == "search_ledger" || x == "update_ledger");
-        if !allowed {
-            return Err("ERROR: Action Denied. You must search or update the Ledger before writing files.".into());
+        let ready = state.ledger_ready.lock().map_err(|_| "Ledger state lock poisoned".to_string())?;
+        if !*ready {
+            return Err("ERROR: Action Denied. Ledger context is stale. Run search_ledger or update_ledger before write_file.".into());
         }
     }
 
@@ -418,11 +425,12 @@ fn write_file(workspace_root: String, path: String, content: String, state: Stat
     }
     fs::rename(&tmp, &p).map_err(|e| e.to_string())?;
 
-    record(state.inner(), "write_file");
     // Ghost Writer is synchronous here: a successful write cannot leave a stale
     // Ledger entry behind even if the application closes immediately afterwards.
     ghost_update(&root, &path, &content)?;
-    record(state.inner(), "update_ledger");
+    // A successful write also refreshes the Ledger, so the next write in the same
+    // agent turn may proceed without an artificial sliding-window failure.
+    mark_ledger_ready(state.inner());
     Ok(())
 }
 
@@ -430,7 +438,7 @@ fn write_file(workspace_root: String, path: String, content: String, state: Stat
 fn search_ledger(workspace_root: String, query: String, state: State<AppState>) -> Result<Vec<Entry>, String> {
     let root = Path::new(&workspace_root).canonicalize().map_err(|e| e.to_string())?;
     let result = search_ledger_inner(&root, &query)?;
-    record(state.inner(), "search_ledger");
+    mark_ledger_ready(state.inner());
     Ok(result)
 }
 
@@ -443,6 +451,7 @@ fn update_ledger(
     state: State<AppState>,
 ) -> Result<(), String> {
     let root = Path::new(&workspace_root).canonicalize().map_err(|e| e.to_string())?;
+    let _ = scoped(&root, &file_path)?;
     ledger_init(&root)?;
     let c = db(&root)?;
     c.execute(
@@ -452,7 +461,7 @@ fn update_ledger(
         params![key, description, file_path],
     ).map_err(|e| e.to_string())?;
     upsert_tokens(&c, &key, &format!("{} {} {}", key, description, file_path))?;
-    record(state.inner(), "update_ledger");
+    mark_ledger_ready(state.inner());
     Ok(())
 }
 
@@ -461,7 +470,7 @@ fn main() {
         workspace: Arc::new(Mutex::new(None)),
         ai_process: Arc::new(Mutex::new(None)),
         ai_status: Arc::new(Mutex::new("starting".into())),
-        recent_actions: Arc::new(Mutex::new(Vec::new())),
+        ledger_ready: Arc::new(Mutex::new(false)),
     };
 
     let app = tauri::Builder::default()
@@ -470,6 +479,7 @@ fn main() {
         .plugin(tauri_plugin_fs::init())
         .invoke_handler(tauri::generate_handler![
             ai_status,
+            begin_agent_turn,
             set_workspace_scope,
             list_dir,
             read_file,
