@@ -50,9 +50,11 @@ fn ghost_update(root:&Path,file_path:&str,content:&str)->Result<(),String>{
     c.execute("INSERT INTO ledger(key,description,file_path,updated_at) VALUES(?1,?2,?3,unixepoch()) ON CONFLICT(key) DO UPDATE SET description=excluded.description,file_path=excluded.file_path,updated_at=unixepoch()",params![key,desc,file_path]).map_err(|e|e.to_string())?;
     Ok(())
 }
-fn start_ai(resource_dir:&Path,state:&AppState)->Result<(),String>{
+fn start_ai(resource_dir:&Path,app_data_dir:&Path,state:&AppState)->Result<(),String>{
     let server=resource_dir.join("bin").join("llama-server-vulkan.exe");
-    let model=resource_dir.join("models").join("qwen-coder.gguf");
+    let model_dir=app_data_dir.join("models");
+    fs::create_dir_all(&model_dir).map_err(|e|format!("Failed to create model directory: {e}"))?;
+    let model=model_dir.join("qwen-coder.gguf");
     if !server.is_file(){return Err(format!("llama-server runtime not found: {}",server.display()));}
     if !model.is_file(){return Err(format!("Qwen model not found: {}",model.display()));}
     let mut g=state.ai_process.lock().map_err(|_|"AI process lock poisoned".to_string())?;
@@ -112,6 +114,7 @@ fn main(){
       .invoke_handler(tauri::generate_handler![set_workspace_scope,list_dir,read_file,write_file,search_ledger,update_ledger])
       .build(tauri::generate_context!()).expect("error while building InfinityCoder");
     let resource=app.path().resource_dir().expect("failed to resolve resource directory");
-    if let Err(e)=start_ai(&resource,app.state::<AppState>().inner()){eprintln!("AI startup warning: {e}");}
+    let app_data=app.path().app_data_dir().expect("failed to resolve app data directory");
+    if let Err(e)=start_ai(&resource,&app_data,app.state::<AppState>().inner()){eprintln!("AI startup warning: {e}");}
     app.run(|h,event|{if let tauri::RunEvent::Exit=event{if let Ok(mut g)=h.state::<AppState>().ai_process.lock(){if let Some(mut c)=g.take(){let _=c.kill();let _=c.wait();}}}});
 }
