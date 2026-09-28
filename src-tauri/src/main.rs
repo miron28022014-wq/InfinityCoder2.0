@@ -105,10 +105,9 @@ fn ledger_init(root: &Path) -> Result<(), String> {
     if token_count == 0 {
         let existing: Vec<(String, String, String)> = {
             let mut s = c.prepare("SELECT key,description,file_path FROM ledger").map_err(|e| e.to_string())?;
-            s.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-                .map_err(|e| e.to_string())?
-                .filter_map(Result::ok)
-                .collect()
+            let rows = s.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .map_err(|e| e.to_string())?;
+            rows.filter_map(Result::ok).collect()
         };
         for (key, description, file_path) in existing {
             upsert_tokens(&c, &key, &format!("{} {} {}", description, file_path, key))?;
@@ -181,7 +180,6 @@ fn hash_content(content: &str) -> u64 {
 fn ghost_update(root: &Path, file_path: &str, content: &str) -> Result<(), String> {
     ledger_init(root)?;
     let c = db(root)?;
-    let file = Path::new(file_path);
     let file_key = format!("file:{}", file_path);
     let mut declarations = Vec::new();
 
@@ -211,10 +209,9 @@ fn ghost_update(root: &Path, file_path: &str, content: &str) -> Result<(), Strin
     let prefix = format!("symbol:{}::", file_path);
     let stale: Vec<String> = {
         let mut s = c.prepare("SELECT key FROM ledger WHERE key LIKE ?1").map_err(|e| e.to_string())?;
-        s.query_map(params![format!("{}%", prefix)], |r| r.get(0))
-            .map_err(|e| e.to_string())?
-            .filter_map(Result::ok)
-            .collect()
+        let rows = s.query_map(params![format!("{}%", prefix)], |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+        rows.filter_map(Result::ok).collect()
     };
     for key in stale {
         c.execute("DELETE FROM ledger WHERE key=?1", params![key.clone()]).map_err(|e| e.to_string())?;
