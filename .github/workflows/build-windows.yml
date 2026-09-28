@@ -56,10 +56,7 @@ jobs:
           if (-not (Test-Path "src-tauri\bin\llama-server-vulkan.exe")) { throw "Missing llama-server resource." }
           if (-not (Test-Path "src-tauri\models\qwen-coder.gguf")) { throw "Missing Qwen resource." }
 
-      - name: Build Windows installer
-        run: npm run tauri:build
-
-      - name: Upload installer
+      - name: Generate Tauri icon\n        shell: pwsh\n        run: |\n          New-Item -ItemType Directory -Force -Path src-tauri\\icons | Out-Null\n          Add-Type -AssemblyName System.Drawing\n          $bmp = New-Object System.Drawing.Bitmap 256,256\n          $g = [System.Drawing.Graphics]::FromImage($bmp)\n          $g.Clear([System.Drawing.Color]::FromArgb(13,17,23))\n          $font = New-Object System.Drawing.Font("Arial",72,[System.Drawing.FontStyle]::Bold)\n          $brush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(88,166,255))\n          $g.DrawString("IC",$font,$brush,35,70)\n          $bmp.Save("$env:RUNNER_TEMP\\icon.png",[System.Drawing.Imaging.ImageFormat]::Png)\n          $g.Dispose(); $bmp.Dispose()\n          npx @tauri-apps/cli icon "$env:RUNNER_TEMP\\icon.png"\n\n      - name: Build Windows installer\n        run: npm run tauri:build\n\n      - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
           name: InfinityCoder-Windows-Installer
