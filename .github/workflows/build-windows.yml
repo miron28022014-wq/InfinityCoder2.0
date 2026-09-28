@@ -35,8 +35,12 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path "src-tauri\bin" | Out-Null
-          $url = "https://github.com/Caerleus/llama.cpp-vulkan-win/releases/latest/download/llama-vulkan-windows.zip"
-          Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\llama-vulkan.zip"
+          $headers = @{ "Accept" = "application/vnd.github+json"; "User-Agent" = "InfinityCoder-CI" }
+          $release = Invoke-RestMethod -Headers $headers -Uri "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
+          $asset = $release.assets | Where-Object { $_.name -match "bin-win-vulkan-x64\\.zip$" } | Select-Object -First 1
+          if (-not $asset) { throw "Official llama.cpp Windows Vulkan x64 asset was not found." }
+          Write-Host "Using llama.cpp asset: $($asset.name)"
+          Invoke-WebRequest -Headers @{ "User-Agent" = "InfinityCoder-CI" } -Uri $asset.browser_download_url -OutFile "$env:RUNNER_TEMP\llama-vulkan.zip"
           Expand-Archive "$env:RUNNER_TEMP\llama-vulkan.zip" "$env:RUNNER_TEMP\llama-vulkan" -Force
           $server = Get-ChildItem "$env:RUNNER_TEMP\llama-vulkan" -Recurse -Filter "llama-server.exe" | Select-Object -First 1
           if (-not $server) { throw "llama-server.exe was not found in the Vulkan package." }
@@ -50,6 +54,14 @@ jobs:
           if (-not (Test-Path "src-tauri\bin\llama-server-vulkan.exe")) { throw "llama-server copy failed." }
           $dlls = Get-ChildItem "src-tauri\bin" -Filter "*.dll" -File
           if ($dlls.Count -eq 0) { throw "No runtime DLLs were found next to llama-server.exe." }
+
+      - name: Verify source tree and package metadata
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "src-tauri\\Cargo.toml")) { throw "src-tauri/Cargo.toml is missing." }
+          if (-not (Test-Path "src-tauri\\tauri.conf.json")) { throw "src-tauri/tauri.conf.json is missing." }
+          if (-not (Test-Path "src\\main.tsx")) { throw "src/main.tsx is missing." }
+          npm run build
 
       - name: Verify bundled llama-server resource
         shell: pwsh
