@@ -43,23 +43,13 @@ jobs:
           Copy-Item $server.FullName "src-tauri\bin\llama-server-vulkan.exe" -Force
           if (-not (Test-Path "src-tauri\bin\llama-server-vulkan.exe")) { throw "llama-server copy failed." }
 
-      - name: Download Qwen 2.5 Coder Q4_K_M
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path "src-tauri\models" | Out-Null
-          $url = "https://huggingface.co/second-state/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/main/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf?download=true"
-          Invoke-WebRequest -Uri $url -OutFile "src-tauri\models\qwen-coder.gguf"
-          if (-not (Test-Path "src-tauri\models\qwen-coder.gguf")) { throw "Qwen model download failed." }
-
-      - name: Verify bundled resources
+      - name: Verify bundled llama-server resource
         shell: pwsh
         run: |
           $server = Get-Item "src-tauri\bin\llama-server-vulkan.exe"
-          $model = Get-Item "src-tauri\models\qwen-coder.gguf"
           if ($server.Length -lt 1MB) { throw "llama-server file is unexpectedly small." }
-          if ($model.Length -lt 1GB) { throw "Qwen GGUF is unexpectedly small." }
           Write-Host "llama-server: $($server.Length) bytes"
-          Write-Host "Qwen GGUF: $($model.Length) bytes"
+          Write-Host "Qwen model will be downloaded by the Windows installer after installation."
 
       - name: Generate application icons
         shell: pwsh
