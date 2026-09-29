@@ -362,6 +362,90 @@ fn start_ai_background(resource_dir: PathBuf, app_data_dir: PathBuf, state: AppS
     });
 }
 
+fn project_command(root: &Path, action: &str) -> Result<(String, Vec<String>, PathBuf), String> {
+    let cargo = root.join("Cargo.toml");
+    let package = root.join("package.json");
+    let python = root.join("main.py");
+
+    if cargo.is_file() {
+        return Ok(("cargo".into(), if action == "build" { vec!["build".into()] } else { vec!["run".into()] }, root.to_path_buf()));
+    }
+
+    if package.is_file() {
+        let text = fs::read_to_string(&package).map_err(|e| e.to_string())?;
+        let json: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("Invalid package.json: {e}"))?;
+        let scripts = json.get("scripts").and_then(|v| v.as_object()).ok_or("package.json has no scripts")?;
+        let name = if action == "build" { "build" } else if scripts.contains_key("start") { "start" } else { "dev" };
+        if !scripts.contains_key(name) {
+            return Err(format!("package.json has no {name} script"));
+        }
+        #[cfg(windows)]
+        let program = "npm.cmd";
+        #[cfg(not(windows))]
+        let program = "npm";
+        return Ok((program.into(), vec!["run".into(), name.into()], root.to_path_buf()));
+    }
+
+    if python.is_file() {
+        #[cfg(windows)]
+        let program = "py";
+        #[cfg(not(windows))]
+        let program = "python3";
+        return Ok((program.into(), vec!["main.py".into()], root.to_path_buf()));
+    }
+
+    Err("No supported project entry point found. Expected Cargo.toml, package.json, or main.py.".into())
+}
+
+fn cap_process_output(mut text: String) -> String {
+    const LIMIT: usize = 120_000;
+    if text.len() > LIMIT {
+        text.truncate(LIMIT);
+        text.push_str("\n\n[output truncated at 120 KB]");
+    }
+    text
+}
+
+fn build_project_inner(root: &Path) -> Result<String, String> {
+    let (program, args, cwd) = project_command(root, "build")?;
+    let output = Command::new(&program).args(&args).current_dir(&cwd).stdin(Stdio::null()).output()
+        .map_err(|e| format!("Failed to start compiler '{program}': {e}"))?;
+    let mut text = format!("$ {} {}\n\n", program, args.join(" "));
+    text.push_str(&String::from_utf8_lossy(&output.stdout));
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    text.push_str(&format!("\n\nProcess exit code: {}", output.status.code().unwrap_or(-1)));
+    if !output.status.success() { return Err(cap_process_output(text)); }
+    Ok(cap_process_output(text))
+}
+
+fn run_project_inner(root: &Path) -> Result<String, String> {
+    let (program, args, cwd) = project_command(root, "run")?;
+    let child = Command::new(&program).args(&args).current_dir(&cwd)
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()
+        .map_err(|e| format!("Failed to start runner '{program}': {e}"))?;
+    Ok(format!("Started: {} {}\nPID: {}", program, args.join(" "), child.id()))
+}
+
+#[tauri::command]
+fn build_project(workspace_root: String) -> Result<String, String> {
+    let root = Path::new(&workspace_root).canonicalize().map_err(|e| e.to_string())?;
+    build_project_inner(&root)
+}
+
+#[tauri::command]
+fn run_project(workspace_root: String) -> Result<String, String> {
+    let root = Path::new(&workspace_root).canonicalize().map_err(|e| e.to_string())?;
+    run_project_inner(&root)
+}
+
+#[tauri::command]
+fn build_and_run_project(workspace_root: String) -> Result<String, String> {
+    let root = Path::new(&workspace_root).canonicalize().map_err(|e| e.to_string())?;
+    let build = build_project_inner(&root)?;
+    let run = run_project_inner(&root)?;
+    Ok(format!("{}\n\n{}", build, run))
+}
+
 #[tauri::command]
 fn begin_agent_turn(state: State<AppState>) -> Result<(), String> {
     reset_agent_turn(state.inner());
@@ -411,6 +495,19 @@ fn read_file(workspace_root: String, path: String, _state: State<AppState>) -> R
     let content = fs::read_to_string(&p).map_err(|e| e.to_string())?;
 
     Ok(content)
+}
+
+#[tauri::command]
+fn save_file(workspace_root: String, path: String, content: String) -> Result<(), String> {
+    let root = Path::new(&workspace_root).canonicalize().map_err(|e| e.to_string())?;
+    let p = scoped(&root, &path)?;
+    if let Some(parent) = p.parent() { fs::create_dir_all(parent).map_err(|e| e.to_string())?; }
+    let tmp = p.with_extension(format!("{}.infinitycoder.tmp", p.extension().and_then(|x| x.to_str()).unwrap_or("file")));
+    fs::write(&tmp, content.as_bytes()).map_err(|e| e.to_string())?;
+    if p.exists() { fs::remove_file(&p).map_err(|e| e.to_string())?; }
+    fs::rename(&tmp, &p).map_err(|e| e.to_string())?;
+    ghost_update(&root, &path, &content)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -490,9 +587,13 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             ai_status,
             begin_agent_turn,
+            build_project,
+            run_project,
+            build_and_run_project,
             set_workspace_scope,
             list_dir,
             read_file,
+            save_file,
             write_file,
             search_ledger,
             update_ledger
