@@ -15,6 +15,7 @@ export default function App() {
   const [autoRun, setAutoRun] = useState(true);
   const [treeVersion, setTreeVersion] = useState(0);
   const [notice, setNotice] = useState("");
+  const [menuOpen, setMenuOpen] = useState(false);
   const fileName = file?.split(/[\\/]/).pop() ?? "No file selected";
 
   const saveCurrentFile = useCallback(async (): Promise<boolean> => {
@@ -129,9 +130,20 @@ export default function App() {
           <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-[#58a6ff] to-[#8957e5] flex items-center justify-center text-white font-bold">∞</div>
           <div><div className="text-sm font-semibold leading-none">InfinityCoder</div><div className="text-[10px] text-[#8b949e] mt-1">Local AI IDE · 2.0</div></div>
         </div>
-        <div className="flex-1 flex items-center justify-center min-w-0">
-          <div className="text-xs text-[#8b949e] bg-[#0d1117] border border-[#30363d] rounded-md px-3 py-1.5 max-w-[420px] truncate">{root || "No workspace open"}</div>
+        <div className="flex items-center gap-1.5">
+          <button onClick={() => setMenuOpen(v => !v)} className="menu-trigger">☰ Menu</button>
+          <span className="ai-badge">LOCAL AI · AUTONOMOUS</span>
         </div>
+        <div className="flex-1 flex items-center justify-center min-w-0">
+          <div className="text-xs text-[#8b949e] bg-[#0d1117] border border-[#30363d] rounded-md px-3 py-1.5 max-w-[420px] truncate">{root || "Conversation mode · no project selected"}</div>
+        </div>
+        {menuOpen && <div className="app-menu">
+          <div className="app-menu-title">Quick actions</div>
+          <button onClick={() => { setMenuOpen(false); void createNewFile(); }} disabled={!root || busy}>＋ New file</button>
+          <button onClick={() => { setMenuOpen(false); void build(); }} disabled={!root || busy}>🔨 Build</button>
+          <button onClick={() => { setMenuOpen(false); void run(); }} disabled={!root || busy}>▶ Run</button>
+          <button onClick={() => { setMenuOpen(false); void buildAndMaybeRun(); }} disabled={!root || busy}>⚡ Build & Run</button>
+        </div>}
         <div className="flex items-center gap-1.5">
           {notice && <span className="text-[10px] text-[#3fb950] animate-fade-in">{notice}</span>}
           <button onClick={createNewFile} disabled={!root || busy} title="Create a new file" className="h-8 px-2.5 rounded-md border border-[#30363d] hover:bg-[#21262d] disabled:opacity-40 text-xs transition-all duration-200">＋ File</button>
