@@ -515,10 +515,15 @@ export function useAI({
       { name: "Tester", instruction: "You are the TESTER subagent. Verify the finished task. Use build_project and run_project or build_and_run_project when appropriate. If verification fails, diagnose and fix it, then retry." }
     ];
     const results: string[] = [];
+    let previous = "";
     for (const phase of phases) {
       onPhase(phase.name);
-      const prompt = phase.instruction + "\n\nMASTER TASK:\n" + task + "\n\nThis is a beta subagent pass. Continue from the current project state and never claim success without tool evidence.";
+      const prompt = phase.instruction +
+        "\n\nMASTER TASK:\n" + task +
+        "\n\nPREVIOUS SUBAGENT OUTPUT:\n" + previous.slice(-8000) +
+        "\n\nThis is a beta subagent pass. Continue from the current project state and never claim success without tool evidence.";
       const result = await sendMessage(prompt, onDelta);
+      previous = result;
       results.push(phase.name + ": " + result);
     }
     onPhase("Complete");
