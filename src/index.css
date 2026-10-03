@@ -12,3 +12,27 @@ button, textarea { font: inherit; }
 ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 8px; }
 ::-webkit-scrollbar-thumb:hover { background: #484f58; }
 ::selection { background: rgba(88, 166, 255, .25); }
+
+
+.app-shell {
+  background:
+    radial-gradient(circle at 12% 0%, rgba(88, 166, 255, .07), transparent 28%),
+    radial-gradient(circle at 88% 100%, rgba(137, 87, 229, .06), transparent 30%),
+    #0d1117;
+}
+.panel-surface {
+  box-shadow: inset -1px 0 rgba(255,255,255,.015);
+}
+.animate-fade-in {
+  animation: infinity-fade-in .22s ease-out both;
+}
+@keyframes infinity-fade-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+button {
+  transition: background-color .16s ease, border-color .16s ease, transform .16s ease, opacity .16s ease;
+}
+button:not(:disabled):active {
+  transform: translateY(1px) scale(.99);
+}
