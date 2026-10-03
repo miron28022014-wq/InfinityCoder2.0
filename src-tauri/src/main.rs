@@ -359,6 +359,7 @@ fn start_ai(resource_dir: &Path, app_data_dir: &Path, state: &AppState) -> Resul
             "--host", AI_HOST,
             "--port", &AI_PORT.to_string(),
             "--device", "Vulkan0",
+            "--jinja",
             "--alias", "qwen-coder",
         ])
         .stdin(Stdio::null())
