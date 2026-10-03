@@ -49,19 +49,63 @@ fn db(root: &Path) -> Result<Connection, String> {
 }
 
 fn scoped(root: &Path, user_path: &str) -> Result<PathBuf, String> {
-    let p = Path::new(user_path);
-    let full = if p.is_absolute() { p.to_path_buf() } else { root.join(p) };
-    let canon_root = root.canonicalize().map_err(|e| e.to_string())?;
-    let canon = if full.exists() {
-        full.canonicalize().map_err(|e| e.to_string())?
+    let canon_root = root.canonicalize().map_err(|e| format!("Invalid workspace root: {e}"))?;
+    let input = Path::new(user_path);
+
+    // Accept both the absolute paths emitted by the Explorer and paths relative
+    // to the selected workspace. Normalize the path lexically first so a new
+    // file such as "src/new/file.ts" can be created even when "src/new" does
+    // not exist yet.
+    let candidate = if input.is_absolute() {
+        input.to_path_buf()
     } else {
-        let parent = full.parent().ok_or("Invalid path")?.canonicalize().map_err(|e| e.to_string())?;
-        parent.join(full.file_name().ok_or("Invalid filename")?)
+        canon_root.join(input)
     };
-    if !canon.starts_with(&canon_root) {
+
+    let mut cursor = candidate.clone();
+    let mut missing = Vec::<PathBuf>::new();
+
+    while !cursor.exists() {
+        let component = cursor
+            .file_name()
+            .ok_or_else(|| format!("Invalid path: {}", candidate.display()))?
+            .to_os_string();
+        if component == ".." {
+            return Err("Path escapes workspace".into());
+        }
+        missing.push(PathBuf::from(component));
+        cursor = cursor
+            .parent()
+            .ok_or_else(|| format!("Invalid path: {}", candidate.display()))?
+            .to_path_buf();
+    }
+
+    let canonical_existing = cursor
+        .canonicalize()
+        .map_err(|e| format!("Cannot resolve path '{}': {e}", cursor.display()))?;
+
+    if !canonical_existing.starts_with(&canon_root) {
         return Err("Path escapes workspace".into());
     }
-    Ok(canon)
+
+    let mut resolved = canonical_existing;
+    for component in missing.iter().rev() {
+        if component == ".." {
+            return Err("Path escapes workspace".into());
+        }
+        resolved.push(component);
+    }
+
+    // Existing targets must also pass the canonical symlink check.
+    if candidate.exists() {
+        let canonical_target = candidate.canonicalize().map_err(|e| e.to_string())?;
+        if !canonical_target.starts_with(&canon_root) {
+            return Err("Path escapes workspace".into());
+        }
+        return Ok(canonical_target);
+    }
+
+    Ok(resolved)
 }
 
 fn mark_ledger_ready(state: &AppState) {
@@ -420,25 +464,49 @@ fn build_project_inner(root: &Path) -> Result<String, String> {
 
 fn run_project_inner(root: &Path) -> Result<String, String> {
     let (program, args, cwd) = project_command(root, "run")?;
-    let child = Command::new(&program).args(&args).current_dir(&cwd)
-        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()
-        .map_err(|e| format!("Failed to start runner '{program}': {e}"))?;
-    Ok(format!("Started: {} {}\nPID: {}", program, args.join(" "), child.id()))
+    let mut command = Command::new(&program);
+    command
+        .args(&args)
+        .current_dir(&cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    let child = command
+        .spawn()
+        .map_err(|e| {
+            format!(
+                "Failed to start runner '{}'.\nWorking directory: {}\nCommand: {} {}\nError: {}",
+                program,
+                cwd.display(),
+                program,
+                args.join(" "),
+                e
+            )
+        })?;
+
+    Ok(format!(
+        "Started successfully.\nCommand: {} {}\nWorking directory: {}\nPID: {}",
+        program,
+        args.join(" "),
+        cwd.display(),
+        child.id()
+    ))
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case", async)]
 fn build_project(workspace_root: String) -> Result<String, String> {
     let root = Path::new(&workspace_root).canonicalize().map_err(|e| e.to_string())?;
     build_project_inner(&root)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case", async)]
 fn run_project(workspace_root: String) -> Result<String, String> {
     let root = Path::new(&workspace_root).canonicalize().map_err(|e| e.to_string())?;
     run_project_inner(&root)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case", async)]
 fn build_and_run_project(workspace_root: String) -> Result<String, String> {
     let root = Path::new(&workspace_root).canonicalize().map_err(|e| e.to_string())?;
     let build = build_project_inner(&root)?;
@@ -446,18 +514,18 @@ fn build_and_run_project(workspace_root: String) -> Result<String, String> {
     Ok(format!("{}\n\n{}", build, run))
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 fn begin_agent_turn(state: State<AppState>) -> Result<(), String> {
     reset_agent_turn(state.inner());
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 fn ai_status(state: State<AppState>) -> Result<String, String> {
     state.ai_status.lock().map(|s| s.clone()).map_err(|_| "AI status lock poisoned".into())
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 fn set_workspace_scope(path: String, state: State<AppState>) -> Result<(), String> {
     let p = PathBuf::from(path);
     if !p.is_dir() {
@@ -470,7 +538,7 @@ fn set_workspace_scope(path: String, state: State<AppState>) -> Result<(), Strin
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 fn list_dir(workspace_root: String, path: String) -> Result<Vec<FileItem>, String> {
     let root = Path::new(&workspace_root).canonicalize().map_err(|e| e.to_string())?;
     let dir = scoped(&root, &path)?;
@@ -488,7 +556,7 @@ fn list_dir(workspace_root: String, path: String) -> Result<Vec<FileItem>, Strin
     Ok(out)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 fn read_file(workspace_root: String, path: String, _state: State<AppState>) -> Result<String, String> {
     let root = Path::new(&workspace_root).canonicalize().map_err(|e| e.to_string())?;
     let p = scoped(&root, &path)?;
@@ -497,7 +565,7 @@ fn read_file(workspace_root: String, path: String, _state: State<AppState>) -> R
     Ok(content)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 fn save_file(workspace_root: String, path: String, content: String) -> Result<(), String> {
     let root = Path::new(&workspace_root).canonicalize().map_err(|e| e.to_string())?;
     let p = scoped(&root, &path)?;
@@ -510,7 +578,46 @@ fn save_file(workspace_root: String, path: String, content: String) -> Result<()
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
+fn create_file(
+    workspace_root: String,
+    path: String,
+    content: String,
+    state: State<AppState>,
+) -> Result<String, String> {
+    let root = Path::new(&workspace_root).canonicalize().map_err(|e| e.to_string())?;
+    {
+        let ready = state.ledger_ready.lock().map_err(|_| "Ledger state lock poisoned".to_string())?;
+        if !*ready {
+            return Err("ERROR: Action Denied. Ledger context is stale. Run search_ledger or update_ledger before create_file.".into());
+        }
+    }
+
+    let p = scoped(&root, &path)?;
+    if p.exists() {
+        return Err(format!("File already exists: {}", p.display()));
+    }
+    if let Some(parent) = p.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
+    fs::write(&p, content.as_bytes()).map_err(|e| e.to_string())?;
+    let written = fs::read_to_string(&p).map_err(|e| format!("Created file could not be verified: {e}"))?;
+    if written != content {
+        return Err("Created file verification failed: read-back content differs.".into());
+    }
+
+    ghost_update(&root, &path, &content)?;
+    mark_ledger_ready(state.inner());
+
+    Ok(format!(
+        "Created and verified '{}' ({} bytes).",
+        p.display(),
+        content.as_bytes().len()
+    ))
+}
+
+#[tauri::command(rename_all = "snake_case")]
 fn write_file(workspace_root: String, path: String, content: String, state: State<AppState>) -> Result<(), String> {
     let root = Path::new(&workspace_root).canonicalize().map_err(|e| e.to_string())?;
     {
@@ -541,7 +648,7 @@ fn write_file(workspace_root: String, path: String, content: String, state: Stat
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 fn search_ledger(workspace_root: String, query: String, state: State<AppState>) -> Result<Vec<Entry>, String> {
     let root = Path::new(&workspace_root).canonicalize().map_err(|e| e.to_string())?;
     let result = search_ledger_inner(&root, &query)?;
@@ -549,7 +656,7 @@ fn search_ledger(workspace_root: String, query: String, state: State<AppState>) 
     Ok(result)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 fn update_ledger(
     workspace_root: String,
     key: String,
@@ -594,6 +701,7 @@ fn main() {
             list_dir,
             read_file,
             save_file,
+            create_file,
             write_file,
             search_ledger,
             update_ledger
@@ -615,4 +723,49 @@ fn main() {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scoped_allows_new_nested_file_inside_workspace() {
+        let dir = std::env::temp_dir().join(format!("infinitycoder-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let path = scoped(&dir, "src/new/file.ts").unwrap();
+        assert!(path.starts_with(dir.canonicalize().unwrap()));
+        assert_eq!(path.file_name().unwrap().to_string_lossy(), "file.ts");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scoped_rejects_parent_escape_for_new_path() {
+        let dir = std::env::temp_dir().join(format!("infinitycoder-test-escape-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let result = scoped(&dir, "../outside.txt");
+        assert!(result.is_err());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn project_command_detects_package_build_and_run_scripts() {
+        let dir = std::env::temp_dir().join(format!("infinitycoder-test-package-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(&dir.join("package.json"), r#"{"scripts":{"build":"vite build","start":"vite preview"}}"#).unwrap();
+
+        let (_, build_args, _) = project_command(&dir, "build").unwrap();
+        let (_, run_args, _) = project_command(&dir, "run").unwrap();
+        assert_eq!(build_args, vec!["run".to_string(), "build".to_string()]);
+        assert_eq!(run_args, vec!["run".to_string(), "start".to_string()]);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
