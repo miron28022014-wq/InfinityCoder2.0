@@ -1,53 +1,219 @@
 import { useCallback, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
-export type Msg = { role: "user" | "assistant" | "system" | "tool"; content: string };
-type ToolCall = { tool: string; args: Record<string, string> };
+export type Msg = {
+  role: "user" | "assistant" | "system" | "tool";
+  content: string;
+  tool_call_id?: string;
+};
 
-const TOOL_NAMES = ["read_file", "write_file", "list_dir", "search_ledger", "update_ledger"];
-const MAX_CONTEXT_MESSAGES = 10;
-const MAX_AGENT_TURNS = 512;
+type ToolCall = {
+  id: string;
+  type: "function";
+  function: { name: string; arguments: string };
+};
+
+const TOOL_NAMES = [
+  "read_file",
+  "write_file",
+  "create_file",
+  "list_dir",
+  "search_ledger",
+  "update_ledger"
+] as const;
+
+const MAX_CONTEXT_MESSAGES = 24;
+const MAX_AGENT_TURNS = 128;
 const MAX_FILE_CONTEXT = 12000;
 const MAX_RECALL_ENTRIES = 8;
 
-async function runTool(tool: string, args: Record<string, string>): Promise<string> {
+const TOOL_DEFINITIONS = [
+  {
+    type: "function",
+    function: {
+      name: "read_file",
+      description: "Read a UTF-8 text file inside the current workspace. Use this before editing an existing file.",
+      parameters: {
+        type: "object",
+        properties: {
+          workspace_root: { type: "string", description: "Absolute path of the current workspace." },
+          path: { type: "string", description: "Absolute or workspace-relative file path." }
+        },
+        required: ["workspace_root", "path"],
+        additionalProperties: false
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "write_file",
+      description: "Create or replace a UTF-8 text file inside the current workspace. Before calling it, search or update the Ledger.",
+      parameters: {
+        type: "object",
+        properties: {
+          workspace_root: { type: "string" },
+          path: { type: "string" },
+          content: { type: "string" }
+        },
+        required: ["workspace_root", "path", "content"],
+        additionalProperties: false
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "create_file",
+      description: "Create a brand-new UTF-8 file. Fails safely if the file already exists. Use this when the user explicitly asks for a new file.",
+      parameters: {
+        type: "object",
+        properties: {
+          workspace_root: { type: "string" },
+          path: { type: "string" },
+          content: { type: "string" }
+        },
+        required: ["workspace_root", "path", "content"],
+        additionalProperties: false
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_dir",
+      description: "List files and directories inside the workspace.",
+      parameters: {
+        type: "object",
+        properties: {
+          workspace_root: { type: "string" },
+          path: { type: "string" }
+        },
+        required: ["workspace_root", "path"],
+        additionalProperties: false
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "search_ledger",
+      description: "Search durable project memory for files, symbols, architecture decisions and prior checkpoints.",
+      parameters: {
+        type: "object",
+        properties: {
+          workspace_root: { type: "string" },
+          query: { type: "string" }
+        },
+        required: ["workspace_root", "query"],
+        additionalProperties: false
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "update_ledger",
+      description: "Store durable project memory. Use it after important file changes and before writes when context needs to be established.",
+      parameters: {
+        type: "object",
+        properties: {
+          workspace_root: { type: "string" },
+          key: { type: "string" },
+          description: { type: "string" },
+          file_path: { type: "string" }
+        },
+        required: ["workspace_root", "key", "description", "file_path"],
+        additionalProperties: false
+      }
+    }
+  }
+] as const;
+
+async function runTool(tool: string, args: Record<string, unknown>): Promise<string> {
   try {
     switch (tool) {
-      case "read_file": return await invoke<string>("read_file", args);
-      case "write_file": await invoke("write_file", args); return JSON.stringify({ ok: true });
-      case "list_dir": return JSON.stringify(await invoke("list_dir", args));
-      case "search_ledger": return JSON.stringify(await invoke("search_ledger", args));
-      case "update_ledger": await invoke("update_ledger", args); return JSON.stringify({ ok: true });
-      default: return JSON.stringify({ error: "Unknown tool" });
+      case "read_file":
+        return await invoke<string>("read_file", args);
+      case "write_file":
+        return await invoke<string>("write_file", args);
+      case "create_file":
+        return await invoke<string>("create_file", args);
+      case "list_dir":
+        return JSON.stringify(await invoke("list_dir", args));
+      case "search_ledger":
+        return JSON.stringify(await invoke("search_ledger", args));
+      case "update_ledger":
+        await invoke("update_ledger", args);
+        return JSON.stringify({ ok: true });
+      default:
+        return JSON.stringify({ ok: false, error: "Unknown tool: " + tool });
     }
   } catch (e) {
-    return JSON.stringify({ error: String(e) });
+    return JSON.stringify({ ok: false, error: String(e) });
   }
 }
 
-function extractCalls(text: string): ToolCall[] {
-  const out: ToolCall[] = [];
-  const re = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text))) {
-    try {
-      const x = JSON.parse(m[1]);
-      if (x?.tool && x?.args) out.push(x);
-    } catch { /* model emitted malformed tool JSON; the next turn can recover */ }
+function normalizeToolCall(raw: any): ToolCall | null {
+  const fn = raw?.function ?? raw;
+  const name = String(fn?.name ?? raw?.tool ?? "").trim();
+  if (!TOOL_NAMES.includes(name as (typeof TOOL_NAMES)[number])) return null;
+
+  let args = fn?.arguments ?? raw?.args ?? raw?.parameters ?? {};
+  if (typeof args !== "string") args = JSON.stringify(args);
+  return {
+    id: String(raw?.id ?? "call_" + Math.random().toString(36).slice(2)),
+    type: "function",
+    function: { name, arguments: String(args) }
+  };
+}
+
+function parseJsonCandidate(text: string): ToolCall | null {
+  try {
+    const parsed = JSON.parse(text.trim());
+    return normalizeToolCall(parsed);
+  } catch {
+    return null;
   }
+}
+
+function extractFallbackCalls(text: string): ToolCall[] {
+  const out: ToolCall[] = [];
+  const seen = new Set<string>();
+
+  const add = (raw: any) => {
+    const call = normalizeToolCall(raw);
+    if (!call) return;
+    const key = call.function.name + ":" + call.function.arguments;
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push(call);
+    }
+  };
+
+  // Qwen 2.5's documented generic/native-compatible format.
+  const xml = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = xml.exec(text))) add(parseJsonCandidate(match[1]));
+
+  // Some model builds omit the XML wrapper but still emit a complete object.
+  const objects = text.match(/\{\s*"(?:name|tool)"\s*:[\s\S]*?\}/g) ?? [];
+  for (const object of objects) add(parseJsonCandidate(object));
+
   return out;
 }
 
-function identifiers(text: string): string[] {
+function extractIdentifiers(text: string): string[] {
   const stop = new Set([
     "const", "function", "return", "class", "interface", "string", "number",
     "boolean", "undefined", "InfinityCoder", "workspace", "project", "file",
-    "this", "that", "with", "from", "into", "true", "false"
+    "this", "that", "with", "from", "into", "true", "false", "create",
+    "write", "make", "please", "file"
   ]);
   return [...new Set(
     (text.match(/\b[A-Za-z_$][A-Za-z0-9_$-]{2,}\b/g) ?? [])
       .filter(x => !stop.has(x))
-  )].slice(0, 10);
+  )].slice(0, 8);
 }
 
 async function waitForAI(): Promise<void> {
@@ -58,6 +224,15 @@ async function waitForAI(): Promise<void> {
     await new Promise(r => setTimeout(r, 500));
   }
   throw new Error("AI engine did not become ready within 90 seconds.");
+}
+
+function compactHistory(history: any[]): any[] {
+  if (history.length <= MAX_CONTEXT_MESSAGES) return history;
+
+  const tail = history.slice(-MAX_CONTEXT_MESSAGES);
+  // Never start a request with a dangling tool response.
+  while (tail.length && tail[0]?.role === "tool") tail.shift();
+  return tail;
 }
 
 export function useAI({
@@ -90,12 +265,14 @@ export function useAI({
 
     try {
       await waitForAI();
-      // Start a fresh Gatekeeper chain for this user request. Ledger access
-      // performed below will explicitly authorize the next write operation.
       await invoke("begin_agent_turn");
 
       const initialRecall = await recall(text);
-      let history: Msg[] = [...messages, { role: "user", content: text }];
+      const history: any[] = [
+        ...messages.map(m => ({ role: m.role, content: m.content, ...(m.tool_call_id ? { tool_call_id: m.tool_call_id } : {}) })),
+        { role: "user", content: text }
+      ];
+
       const baseContext = [
         openFilePath ? `OPEN FILE: ${openFilePath}\n${openFileContent.slice(0, MAX_FILE_CONTEXT)}` : "",
         initialRecall.length
@@ -104,11 +281,8 @@ export function useAI({
       ].filter(Boolean).join("\n\n");
 
       const recalled = new Set<string>();
-      for (let turn = 0; turn < MAX_AGENT_TURNS; turn++) {
-        const compactHistory = history.length > MAX_CONTEXT_MESSAGES
-          ? history.slice(-MAX_CONTEXT_MESSAGES)
-          : history;
 
+      for (let turn = 0; turn < MAX_AGENT_TURNS; turn++) {
         const response = await fetch(engineBaseUrl + "/v1/chat/completions", {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -119,14 +293,17 @@ export function useAI({
                 role: "system",
                 content:
                   systemPrompt +
-                  "\n\nAVAILABLE TOOLS: " + TOOL_NAMES.join(", ") +
-                  "\nUse exactly <tool_call>{\"tool\":\"name\",\"args\":{...}}</tool_call> and wait for the result." +
-                  "\nNever write a file before a Ledger search/update in the current action chain." +
+                  "\n\nTOOLS ARE REAL: when a task requires reading, creating or modifying project files, CALL A TOOL. Do not merely describe what you would do." +
+                  "\nFor a new file, use create_file. For an existing file, read_file first, then write_file." +
+                  "\nAfter a tool result, continue the task and verify important writes." +
                   "\nWorkspace: " + workspaceRoot
               },
               ...(baseContext ? [{ role: "system" as const, content: baseContext }] : []),
-              ...compactHistory
+              ...compactHistory(history)
             ],
+            tools: TOOL_DEFINITIONS,
+            tool_choice: "auto",
+            parallel_tool_calls: false,
             stream: true,
             n_predict: -1,
             cache_prompt: true,
@@ -134,7 +311,11 @@ export function useAI({
           })
         });
 
-        if (!response.ok) throw new Error(await response.text());
+        if (!response.ok) {
+          const detail = await response.text();
+          throw new Error(`AI server HTTP ${response.status}: ${detail.slice(0, 4000)}`);
+        }
+
         const reader = response.body?.getReader();
         if (!reader) throw new Error("AI server returned no response stream.");
 
@@ -142,10 +323,12 @@ export function useAI({
         let pending = "";
         let full = "";
         let finishReason = "";
+        const streamedToolCalls = new Map<number, ToolCall>();
 
         while (true) {
           const { value, done } = await reader.read();
           if (done) break;
+
           pending += decoder.decode(value, { stream: true });
           const lines = pending.split("\n");
           pending = lines.pop() ?? "";
@@ -154,37 +337,108 @@ export function useAI({
             if (!line.startsWith("data:")) continue;
             const data = line.slice(5).trim();
             if (!data || data === "[DONE]") continue;
+
+            try {
+              const json = JSON.parse(data);
+              const choice = json.choices?.[0];
+              const delta = choice?.delta ?? {};
+              finishReason = choice?.finish_reason ?? finishReason;
+
+              const content = delta.content ?? "";
+              if (content) {
+                full += content;
+                onDelta(content);
+              }
+
+              for (const raw of (delta.tool_calls ?? [])) {
+                const index = Number(raw.index ?? 0);
+                const existing = streamedToolCalls.get(index) ?? {
+                  id: "",
+                  type: "function" as const,
+                  function: { name: "", arguments: "" }
+                };
+
+                if (raw.id) existing.id += raw.id;
+                if (raw.function?.name) existing.function.name += raw.function.name;
+                if (raw.function?.arguments) existing.function.arguments += raw.function.arguments;
+                streamedToolCalls.set(index, existing);
+              }
+            } catch {
+              // Ignore keep-alives and malformed partial SSE frames.
+            }
+          }
+        }
+
+        // A final line can arrive without a trailing newline.
+        if (pending.startsWith("data:")) {
+          const data = pending.slice(5).trim();
+          if (data && data !== "[DONE]") {
             try {
               const json = JSON.parse(data);
               const choice = json.choices?.[0];
               finishReason = choice?.finish_reason ?? finishReason;
-              const delta = choice?.delta?.content ?? "";
-              if (delta) {
-                full += delta;
-                onDelta(delta);
+              const content = choice?.delta?.content ?? "";
+              if (content) {
+                full += content;
+                onDelta(content);
               }
-            } catch { /* ignore SSE keep-alives/non-JSON lines */ }
+            } catch { /* ignore incomplete final frame */ }
           }
         }
 
-        history.push({ role: "assistant", content: full });
-        const calls = extractCalls(full);
+        let toolCalls = [...streamedToolCalls.values()]
+          .map(normalizeToolCall)
+          .filter((x): x is ToolCall => Boolean(x));
 
-        if (calls.length) {
-          for (const call of calls) {
-            const result = await runTool(call.tool, {
-              workspace_root: workspaceRoot,
-              ...call.args
+        if (!toolCalls.length) {
+          toolCalls = extractFallbackCalls(full);
+        }
+
+        if (toolCalls.length) {
+          const assistantMessage: any = {
+            role: "assistant",
+            content: full || null,
+            tool_calls: toolCalls
+          };
+          history.push(assistantMessage);
+
+          for (const call of toolCalls) {
+            let parsedArgs: Record<string, unknown>;
+            try {
+              parsedArgs = JSON.parse(call.function.arguments || "{}");
+            } catch {
+              parsedArgs = {};
+            }
+
+            if (!parsedArgs.workspace_root) parsedArgs.workspace_root = workspaceRoot;
+
+            const result = await runTool(call.function.name, parsedArgs);
+            history.push({
+              role: "tool",
+              tool_call_id: call.id,
+              content: result
             });
-            history.push({ role: "tool", content: call.tool + " RESULT:\n" + result });
           }
+
           continue;
         }
 
-        // Auto-Recall is a real continuation loop: retrieve missing entities and
-        // give them to the model on the next turn instead of merely logging them.
-        const ids = identifiers(text + "\n" + full)
-          .filter(id => !recalled.has(id));
+        if (full) {
+          history.push({ role: "assistant", content: full });
+        }
+
+        // If the model stopped because of the generation budget, explicitly
+        // continue rather than silently treating a partial answer as complete.
+        if (finishReason === "length") {
+          history.push({
+            role: "user",
+            content: "Continue from the exact end of your previous response. Do not restart. If work is required, use the available tools."
+          });
+          continue;
+        }
+
+        // Lightweight semantic recall for symbols mentioned by the model.
+        const ids = extractIdentifiers(text + "\n" + full).filter(id => !recalled.has(id));
         const recallHits: any[] = [];
         for (const id of ids) {
           recalled.add(id);
@@ -194,21 +448,9 @@ export function useAI({
 
         if (recallHits.length) {
           history.push({
-            role: "tool",
-            content: "AUTO_RECALL RESULTS:\n" + JSON.stringify(recallHits)
-          });
-          continue;
-        }
-
-        // llama.cpp may stop because the current response reached its
-        // generation budget. Continue from the exact previous response rather
-        // than treating a length stop as a completed task. The outer loop is
-        // deliberately large so very large code tasks can be completed in
-        // deterministic chunks without requiring one giant model response.
-        if (finishReason === "length") {
-          history.push({
             role: "user",
-            content: "CONTINUE FROM THE EXACT END OF YOUR PREVIOUS RESPONSE. Do not restart, summarize, or repeat completed code. Continue the unfinished work using the Ledger and tools. If a file is being generated, continue in the next deterministic chunk."
+            content: "AUTO_RECALL RESULTS (use these only to locate project state; verify files before edits):\n" +
+              JSON.stringify(recallHits)
           });
           continue;
         }
@@ -216,19 +458,17 @@ export function useAI({
         break;
       }
 
-      // Persist a compact session checkpoint outside the model context. This is
-      // the practical "virtual context" layer: future turns retrieve it by query.
-      const final = history[history.length - 1]?.content ?? "";
+      const final = [...history].reverse().find(m => m.role === "assistant" && m.content)?.content ?? "";
       if (final) {
         await invoke("update_ledger", {
           workspace_root: workspaceRoot,
           key: `session:${Date.now()}`,
-          description: `Conversation checkpoint. User request: ${text.slice(0, 1600)}. Latest AI result: ${final.slice(0, 5000)}`,
+          description: `Conversation checkpoint. User request: ${text.slice(0, 1600)}. Latest AI result: ${String(final).slice(0, 5000)}`,
           file_path: ".infinitycoder/ledger.db"
         }).catch(() => {});
       }
 
-      setMessages(history);
+      setMessages(history.filter(m => m.role === "user" || m.role === "assistant"));
       return final;
     } finally {
       setStreaming(false);
