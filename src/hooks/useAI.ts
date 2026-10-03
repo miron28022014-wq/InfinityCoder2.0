@@ -130,7 +130,7 @@ const TOOL_DEFINITIONS = [
         additionalProperties: false
       }
     }
-  }
+  },
   {
     type: "function",
     function: {
