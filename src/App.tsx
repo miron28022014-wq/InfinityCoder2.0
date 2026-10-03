@@ -13,6 +13,8 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [output, setOutput] = useState("");
   const [autoRun, setAutoRun] = useState(true);
+  const [treeVersion, setTreeVersion] = useState(0);
+  const [notice, setNotice] = useState("");
   const fileName = file?.split(/[\\/]/).pop() ?? "No file selected";
 
   const saveCurrentFile = useCallback(async (): Promise<boolean> => {
@@ -28,6 +30,26 @@ export default function App() {
       return false;
     }
   }, [content, dirty, file, fileName, root]);
+
+  const createNewFile = async () => {
+    if (!root || busy) return;
+    const raw = window.prompt("Имя нового файла (например src/App.tsx):", "src/new-file.ts");
+    const path = raw?.trim();
+    if (!path) return;
+
+    try {
+      await invoke("save_file", { workspace_root: root, path, content: "" });
+      const absolute = path.match(/^[A-Za-z]:[\\/]/) ? path : root.replace(/[\\/]$/, "") + "/" + path;
+      setTreeVersion(v => v + 1);
+      setFile(absolute);
+      setContent("");
+      setDirty(false);
+      setNotice("Файл создан");
+      window.setTimeout(() => setNotice(""), 1800);
+    } catch (error) {
+      await message(String(error), { title: "InfinityCoder — ошибка создания файла", kind: "error" });
+    }
+  };
 
   useEffect(() => {
     const key = async (e: KeyboardEvent) => {
@@ -101,7 +123,7 @@ export default function App() {
   };
 
   return (
-    <main className="h-full flex flex-col overflow-hidden bg-[#0d1117] text-[#e6edf3]">
+    <main className="h-full flex flex-col overflow-hidden bg-[#0d1117] text-[#e6edf3] app-shell">
       <header className="h-12 shrink-0 border-b border-[#30363d] bg-[#161b22] flex items-center px-3 gap-3 select-none">
         <div className="flex items-center gap-2 min-w-[220px]">
           <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-[#58a6ff] to-[#8957e5] flex items-center justify-center text-white font-bold">∞</div>
@@ -111,6 +133,8 @@ export default function App() {
           <div className="text-xs text-[#8b949e] bg-[#0d1117] border border-[#30363d] rounded-md px-3 py-1.5 max-w-[420px] truncate">{root || "No workspace open"}</div>
         </div>
         <div className="flex items-center gap-1.5">
+          {notice && <span className="text-[10px] text-[#3fb950] animate-fade-in">{notice}</span>}
+          <button onClick={createNewFile} disabled={!root || busy} title="Create a new file" className="h-8 px-2.5 rounded-md border border-[#30363d] hover:bg-[#21262d] disabled:opacity-40 text-xs transition-all duration-200">＋ File</button>
           <button onClick={build} disabled={!root || busy} title="Compile project" className="h-8 px-2.5 rounded-md border border-[#30363d] hover:bg-[#21262d] disabled:opacity-40 text-xs">🔨 Build</button>
           <button onClick={run} disabled={!root || busy} title="Run project" className="h-8 px-2.5 rounded-md border border-[#30363d] hover:bg-[#21262d] disabled:opacity-40 text-xs">▶ Run</button>
           <label className="h-8 px-2 flex items-center gap-1.5 text-[10px] text-[#8b949e]" title="Automatically run after a successful build">
@@ -120,8 +144,8 @@ export default function App() {
         </div>
       </header>
 
-      <div className="flex-1 min-h-0 flex">
-        <aside className="w-64 shrink-0 border-r border-[#30363d] bg-[#0d1117] overflow-hidden"><FileTree rootPath={root} onSelectRoot={selectRoot} onSelectFile={selectFile} /></aside>
+      <div className="flex-1 min-h-0 flex animate-fade-in">
+        <aside className="w-64 shrink-0 border-r border-[#30363d] bg-[#0d1117] overflow-hidden panel-surface"><FileTree rootPath={root} refreshToken={treeVersion} onSelectRoot={selectRoot} onSelectFile={selectFile} /></aside>
         <section className="flex-1 min-w-0 bg-[#0d1117] flex flex-col">
           {file && <div className="h-9 shrink-0 border-b border-[#30363d] bg-[#161b22] flex items-center justify-between">
             <div className="h-full px-4 flex items-center gap-2 bg-[#0d1117] text-xs"><span className="text-[#58a6ff]">●</span>{fileName}{dirty && <span className="text-[#d29922]" title="Unsaved">●</span>}</div>
