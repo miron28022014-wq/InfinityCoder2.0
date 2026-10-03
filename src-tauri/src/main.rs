@@ -619,7 +619,7 @@ fn create_file(
 }
 
 #[tauri::command(rename_all = "snake_case")]
-fn write_file(workspace_root: String, path: String, content: String, state: State<AppState>) -> Result<(), String> {
+fn write_file(workspace_root: String, path: String, content: String, state: State<AppState>) -> Result<String, String> {
     let root = Path::new(&workspace_root).canonicalize().map_err(|e| e.to_string())?;
     {
         let ready = state.ledger_ready.lock().map_err(|_| "Ledger state lock poisoned".to_string())?;
@@ -640,13 +640,24 @@ fn write_file(workspace_root: String, path: String, content: String, state: Stat
     }
     fs::rename(&tmp, &p).map_err(|e| e.to_string())?;
 
+    // Verify the actual bytes on disk before reporting success.
+    let written = fs::read_to_string(&p)
+        .map_err(|e| format!("Write succeeded but read-back verification failed: {e}"))?;
+    if written != content {
+        return Err("Write verification failed: read-back content differs.".into());
+    }
+
     // Ghost Writer is synchronous here: a successful write cannot leave a stale
     // Ledger entry behind even if the application closes immediately afterwards.
     ghost_update(&root, &path, &content)?;
     // A successful write also refreshes the Ledger, so the next write in the same
     // agent turn may proceed without an artificial sliding-window failure.
     mark_ledger_ready(state.inner());
-    Ok(())
+    Ok(format!(
+        "Wrote and verified '{}' ({} bytes).",
+        p.display(),
+        content.as_bytes().len()
+    ))
 }
 
 #[tauri::command(rename_all = "snake_case")]
