@@ -4,8 +4,9 @@ import { invoke } from "@tauri-apps/api/core";
 
 type Item = { name: string; path: string; is_dir: boolean };
 
-export function FileTree({ rootPath, onSelectRoot, onSelectFile }: {
+export function FileTree({ rootPath, refreshToken = 0, onSelectRoot, onSelectFile }: {
   rootPath: string;
+  refreshToken?: number;
   onSelectRoot: (p: string) => void;
   onSelectFile: (p: string, c: string) => void;
 }) {
@@ -27,7 +28,7 @@ export function FileTree({ rootPath, onSelectRoot, onSelectFile }: {
       .then(setItems)
       .catch(console.error)
       .finally(() => setLoading(false));
-  }, [rootPath]);
+  }, [rootPath, refreshToken]);
 
   if (!rootPath) {
     return (
