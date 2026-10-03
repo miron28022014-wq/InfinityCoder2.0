@@ -19,7 +19,10 @@ const TOOL_NAMES = [
   "create_file",
   "list_dir",
   "search_ledger",
-  "update_ledger"
+  "update_ledger",
+  "build_project",
+  "run_project",
+  "build_and_run_project"
 ] as const;
 
 const MAX_CONTEXT_MESSAGES = 24;
@@ -128,6 +131,30 @@ const TOOL_DEFINITIONS = [
       }
     }
   }
+  {
+    type: "function",
+    function: {
+      name: "build_project",
+      description: "Build the current workspace using its detected project toolchain.",
+      parameters: { type: "object", properties: { workspace_root: { type: "string" } }, required: ["workspace_root"], additionalProperties: false }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "run_project",
+      description: "Run the current workspace project.",
+      parameters: { type: "object", properties: { workspace_root: { type: "string" } }, required: ["workspace_root"], additionalProperties: false }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "build_and_run_project",
+      description: "Build the workspace and start it only when the build succeeds.",
+      parameters: { type: "object", properties: { workspace_root: { type: "string" } }, required: ["workspace_root"], additionalProperties: false }
+    }
+  }
 ] as const;
 
 async function runTool(tool: string, args: Record<string, unknown>): Promise<string> {
@@ -146,6 +173,12 @@ async function runTool(tool: string, args: Record<string, unknown>): Promise<str
       case "update_ledger":
         await invoke("update_ledger", args);
         return JSON.stringify({ ok: true });
+      case "build_project":
+        return await invoke<string>("build_project", args);
+      case "run_project":
+        return await invoke<string>("run_project", args);
+      case "build_and_run_project":
+        return await invoke<string>("build_and_run_project", args);
       default:
         return JSON.stringify({ ok: false, error: "Unknown tool: " + tool });
     }
@@ -260,14 +293,13 @@ export function useAI({
   }, [workspaceRoot]);
 
   const sendMessage = useCallback(async (text: string, onDelta: (s: string) => void) => {
-    if (!workspaceRoot) throw new Error("Open a project first.");
     setStreaming(true);
 
     try {
       await waitForAI();
-      await invoke("begin_agent_turn");
+      if (workspaceRoot) await invoke("begin_agent_turn");
 
-      const initialRecall = await recall(text);
+      const initialRecall = workspaceRoot ? await recall(text) : [];
       const history: any[] = [
         ...messages.map(m => ({ role: m.role, content: m.content, ...(m.tool_call_id ? { tool_call_id: m.tool_call_id } : {}) })),
         { role: "user", content: text }
@@ -301,8 +333,8 @@ export function useAI({
               ...(baseContext ? [{ role: "system" as const, content: baseContext }] : []),
               ...compactHistory(history)
             ],
-            tools: TOOL_DEFINITIONS,
-            tool_choice: "auto",
+            tools: workspaceRoot ? TOOL_DEFINITIONS : [],
+            tool_choice: workspaceRoot ? "auto" : "none",
             parallel_tool_calls: false,
             stream: true,
             n_predict: -1,
@@ -410,7 +442,7 @@ export function useAI({
               parsedArgs = {};
             }
 
-            if (!parsedArgs.workspace_root) parsedArgs.workspace_root = workspaceRoot;
+            if (!parsedArgs.workspace_root && workspaceRoot) parsedArgs.workspace_root = workspaceRoot;
 
             const result = await runTool(call.function.name, parsedArgs);
             history.push({
@@ -459,7 +491,7 @@ export function useAI({
       }
 
       const final = [...history].reverse().find(m => m.role === "assistant" && m.content)?.content ?? "";
-      if (final) {
+      if (final && workspaceRoot) {
         await invoke("update_ledger", {
           workspace_root: workspaceRoot,
           key: `session:${Date.now()}`,
@@ -475,5 +507,23 @@ export function useAI({
     }
   }, [engineBaseUrl, messages, openFileContent, openFilePath, recall, systemPrompt, workspaceRoot]);
 
-  return { messages, streaming, sendMessage };
+  const runSubagents = useCallback(async (task: string, onDelta: (s: string) => void, onPhase: (name: string) => void) => {
+    const phases = [
+      { name: "Planner", instruction: "You are the PLANNER subagent. Analyze the task and produce a concise implementation plan. Do not edit files." },
+      { name: "Builder", instruction: "You are the BUILDER subagent. Execute the plan now. Use the real file/build/run tools when a workspace is available. Create and modify files instead of merely describing changes. Verify writes." },
+      { name: "Reviewer", instruction: "You are the REVIEWER subagent. Inspect the current implementation for concrete bugs, missing wiring and broken UI actions. Fix issues you find with the real tools." },
+      { name: "Tester", instruction: "You are the TESTER subagent. Verify the finished task. Use build_project and run_project or build_and_run_project when appropriate. If verification fails, diagnose and fix it, then retry." }
+    ];
+    const results: string[] = [];
+    for (const phase of phases) {
+      onPhase(phase.name);
+      const prompt = phase.instruction + "\n\nMASTER TASK:\n" + task + "\n\nThis is a beta subagent pass. Continue from the current project state and never claim success without tool evidence.";
+      const result = await sendMessage(prompt, onDelta);
+      results.push(phase.name + ": " + result);
+    }
+    onPhase("Complete");
+    return results.join("\n\n");
+  }, [sendMessage]);
+
+  return { messages, streaming, sendMessage, runSubagents };
 }
