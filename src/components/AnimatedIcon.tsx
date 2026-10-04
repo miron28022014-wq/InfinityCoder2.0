@@ -16,67 +16,142 @@ const BASE = ((import.meta as unknown as { env?: { BASE_URL?: string } }).env?.B
 const SETTINGS_EVENT = "infinitycoder:animation-settings";
 
 function reducedMotion() {
-  return typeof window !== "undefined" && !!window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+  if (typeof window === "undefined") return false;
+  return !!window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ||
+    window.localStorage.getItem("infinitycoder.reduce-motion") === "on";
 }
+
 function enabledPreference() {
   if (typeof window === "undefined") return true;
   return window.localStorage.getItem("infinitycoder.animations") !== "off";
 }
+
+function speedPreference() {
+  if (typeof window === "undefined") return 1;
+  const raw = Number(window.localStorage.getItem("infinitycoder.animation-speed"));
+  return Number.isFinite(raw) && raw >= 0.5 && raw <= 2 ? raw : 1;
+}
+
 function playFromStart(v: HTMLVideoElement) {
   if (reducedMotion() || !enabledPreference()) return;
   if (!v.paused && !v.ended) return;
+  v.playbackRate = speedPreference();
   try { v.currentTime = 0; } catch {}
   void v.play().catch(() => {});
+}
+
+function FallbackIcon({ name, size, mode, active }: {
+  name: AnimatedIconName;
+  size: number;
+  mode: "hover" | "loop" | "once";
+  active: boolean;
+}) {
+  const motion = !reducedMotion() && enabledPreference();
+  const animationClass = motion
+    ? mode === "loop" && active ? "icon-loop"
+      : mode === "once" ? "icon-once"
+      : active ? "icon-active"
+      : "icon-hover"
+    : "";
+  const stroke = "currentColor";
+  const common = { fill: "none", stroke, strokeWidth: 1.7, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
+  const shapes: Record<AnimatedIconName, JSX.Element> = {
+    home: <><path d="M3 9.8 10 4l7 5.8v7H3z" {...common}/><path d="M7 17v-4h6v4" {...common}/></>,
+    document: <><path d="M5 2.8h7l4 4V17H5z" {...common}/><path d="M12 2.8v4h4" {...common}/><path d="M7.5 10h5M7.5 13h5" {...common}/></>,
+    chat: <><path d="M3 4.8A2.8 2.8 0 0 1 5.8 2h8.4A2.8 2.8 0 0 1 17 4.8v5.5a2.8 2.8 0 0 1-2.8 2.8H9l-4 3v-3.2a2.8 2.8 0 0 1-2-2.6z" {...common}/><path d="M6.5 7h7M6.5 9.6h4.5" {...common}/></>,
+    computer: <><rect x="3" y="3" width="14" height="10" rx="1.5" {...common}/><path d="M8 17h4M6.5 15.5h7" {...common}/></>,
+    hourglass: <><path d="M5 3h10M5 17h10" {...common}/><path d="M6 3c0 3 2 4 4 5 2-1 4-2 4-5M6 17c0-3 2-4 4-5 2 1 4 2 4 5" {...common}/></>,
+    profile: <><circle cx="10" cy="6.5" r="3" {...common}/><path d="M4 17c.8-3 3-4.5 6-4.5s5.2 1.5 6 4.5" {...common}/></>,
+    "right-arrow": <><path d="M4 10h11M11 6l4 4-4 4" {...common}/></>,
+    settings: <><circle cx="10" cy="10" r="2.6" {...common}/><path d="M10 2.5v2M10 15.5v2M2.5 10h2M15.5 10h2M4.7 4.7l1.4 1.4M13.9 13.9l1.4 1.4M15.3 4.7l-1.4 1.4M6.1 13.9l-1.4 1.4" {...common}/></>,
+    share: <><circle cx="5" cy="10" r="2" {...common}/><circle cx="14.5" cy="5" r="2" {...common}/><circle cx="14.5" cy="15" r="2" {...common}/><path d="m6.8 9 5.8-3M6.8 11l5.8 3" {...common}/></>,
+    verified: <><path d="m10 2.8 1.7 1.2 2.1-.1.9 1.9 1.8 1-.5 2 .5 2-1.8 1-.9 1.9-2.1-.1L10 17.2l-1.7-1.2-2.1.1-.9-1.9-1.8-1 .5-2-.5-2 1.8-1 .9-1.9 2.1.1z" {...common}/><path d="m7 10 2 2 4-4" {...common}/></>,
+  };
+  return <svg width={size} height={size} viewBox="0 0 20 20" aria-hidden="true" className={`icon-fallback ${animationClass}`}>{shapes[name]}</svg>;
 }
 
 export function AnimatedIcon({ name, size = 20, mode = "hover", active = false, className = "" }: AnimatedIconProps) {
   const ref = useRef<HTMLVideoElement>(null);
   const [enabled, setEnabled] = useState(enabledPreference);
+  const [failed, setFailed] = useState(false);
 
   useEffect(() => {
-    const sync = () => setEnabled(enabledPreference());
+    const sync = () => {
+      setEnabled(enabledPreference());
+      const v = ref.current;
+      if (v) v.playbackRate = speedPreference();
+    };
     window.addEventListener("storage", sync);
     window.addEventListener(SETTINGS_EVENT, sync);
-    return () => { window.removeEventListener("storage", sync); window.removeEventListener(SETTINGS_EVENT, sync); };
+    return () => {
+      window.removeEventListener("storage", sync);
+      window.removeEventListener(SETTINGS_EVENT, sync);
+    };
   }, []);
+
+  useEffect(() => setFailed(false), [name]);
 
   useEffect(() => {
     const v = ref.current;
-    if (!v || mode !== "hover") return;
-    const host = (v.closest("button, a, [role=" + String.fromCharCode(39) + "button" + String.fromCharCode(39) + "], [data-anim-host]") as HTMLElement | null) ?? v;
+    if (!v || failed || mode !== "hover") return;
+    const host = (v.closest("button, a, [role='button'], [data-anim-host]") as HTMLElement | null) ?? v;
     const onEnter = () => { if (enabled) playFromStart(v); };
-    const onEnd = () => { if (!v.loop) v.currentTime = 0; };
+    const onEnd = () => { if (!v.loop) { try { v.currentTime = 0; } catch {} } };
     host.addEventListener("mouseenter", onEnter);
     host.addEventListener("focus", onEnter);
     v.addEventListener("ended", onEnd);
-    return () => { host.removeEventListener("mouseenter", onEnter); host.removeEventListener("focus", onEnter); v.removeEventListener("ended", onEnd); };
-  }, [enabled, mode]);
+    return () => {
+      host.removeEventListener("mouseenter", onEnter);
+      host.removeEventListener("focus", onEnter);
+      v.removeEventListener("ended", onEnd);
+    };
+  }, [enabled, failed, mode]);
 
   useEffect(() => {
     const v = ref.current;
-    if (!v || mode !== "hover" || !active || !enabled) return;
+    if (!v || failed || mode !== "hover" || !active || !enabled) return;
     playFromStart(v);
-  }, [active, enabled, mode]);
+  }, [active, enabled, failed, mode]);
 
   useEffect(() => {
     const v = ref.current;
-    if (!v || mode !== "loop") return;
-    if (active && enabled && !reducedMotion()) { v.loop = true; playFromStart(v); }
-    else { v.pause(); try { v.currentTime = 0; } catch {} }
-  }, [active, enabled, mode]);
-
-  useEffect(() => {
-    const v = ref.current;
-    if (!v || mode !== "once") return;
-    if (!enabled || reducedMotion()) {
-      const showLastFrame = () => { try { v.currentTime = Math.max(0, v.duration - 0.01); } catch {} };
-      if (v.readyState >= 2) showLastFrame(); else v.addEventListener("loadeddata", showLastFrame, { once: true });
-      return;
+    if (!v || failed || mode !== "loop") return;
+    if (active && enabled && !reducedMotion()) {
+      v.loop = true;
+      playFromStart(v);
+    } else {
+      v.pause();
+      try { v.currentTime = 0; } catch {}
     }
-    playFromStart(v);
-  }, [enabled, mode, name]);
+  }, [active, enabled, failed, mode]);
 
-  return <video ref={ref} src={`${BASE}anim/${name}.webm`} width={size} height={size} muted playsInline preload="auto"
-    loop={mode === "loop" && enabled && !reducedMotion()} disablePictureInPicture draggable={false} aria-hidden="true"
-    className={`inline-block shrink-0 select-none pointer-events-none ${className}`} style={{ width: size, height: size, objectFit: "contain" }} />;
+  useEffect(() => {
+    const v = ref.current;
+    if (!v || failed || mode !== "once") return;
+    if (!enabled || reducedMotion()) {
+      const last = () => { try { v.currentTime = Math.max(0, v.duration - 0.01); } catch {} };
+      if (v.readyState >= 2) last(); else v.addEventListener("loadeddata", last, { once: true });
+    } else {
+      playFromStart(v);
+    }
+  }, [enabled, failed, mode, name]);
+
+  if (failed) return <FallbackIcon name={name} size={size} mode={mode} active={active} />;
+
+  return <video
+    ref={ref}
+    src={`${BASE}anim/${name}.webm`}
+    width={size}
+    height={size}
+    muted
+    playsInline
+    preload="metadata"
+    loop={mode === "loop" && enabled && !reducedMotion()}
+    disablePictureInPicture
+    draggable={false}
+    aria-hidden="true"
+    onError={() => setFailed(true)}
+    className={`inline-block shrink-0 select-none pointer-events-none ${className}`}
+    style={{ width: size, height: size, objectFit: "contain" }}
+  />;
 }
