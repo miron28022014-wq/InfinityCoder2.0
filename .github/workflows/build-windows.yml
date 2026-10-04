@@ -11,7 +11,6 @@ permissions:
 
 env:
   LLAMA_CPP_TAG: b10982
-  LLAMA_CPP_API: https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/b10982
 
 jobs:
   build:
@@ -78,47 +77,22 @@ jobs:
           $ErrorActionPreference = "Stop"
           npm run build
 
-      - name: Download official llama.cpp Vulkan runtime
+      - name: Download pinned llama.cpp Vulkan runtime
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $api = $env:LLAMA_CPP_API
-          $headers = @{
-            "Accept" = "application/vnd.github+json"
-            "X-GitHub-Api-Version" = "2022-11-28"
-            "User-Agent" = "InfinityCoder-CI"
-          }
-
-          Write-Host "Reading llama.cpp release metadata: $api"
-          $release = Invoke-RestMethod -Uri $api -Headers $headers -Method Get
-
-          if ($release.tag_name -ne $env:LLAMA_CPP_TAG) {
-            throw "Unexpected llama.cpp tag: $($release.tag_name)"
-          }
-
-          $asset = $release.assets |
-            Where-Object { $_.name -match "^llama-.*-bin-win-vulkan-x64\.zip$" } |
-            Select-Object -First 1
-
-          if (-not $asset) {
-            $available = ($release.assets | ForEach-Object name) -join ", "
-            throw "Official Windows Vulkan asset was not found. Available assets: $available"
-          }
-
-          Write-Host "Selected asset: $($asset.name)"
-          Write-Host "Download URL: $($asset.browser_download_url)"
-          if ($asset.digest) {
-            Write-Host "Release SHA256: $($asset.digest)"
-          }
-
+          $assetName = "llama-b10982-bin-win-vulkan-x64.zip"
+          $downloadUrl = "https://github.com/ggml-org/llama.cpp/releases/download/b10982/llama-b10982-bin-win-vulkan-x64.zip"
+          $expected = "513e5305d21c71718f8ae2791ef00bf55cd7377b772ef89788a38bd33cf325cd"
           $dir = Join-Path $env:RUNNER_TEMP "llama-vulkan"
-          $zip = Join-Path $env:RUNNER_TEMP $asset.name
+          $zip = Join-Path $env:RUNNER_TEMP $assetName
 
           if (Test-Path $dir) { Remove-Item $dir -Recurse -Force }
           if (Test-Path $zip) { Remove-Item $zip -Force }
           New-Item -ItemType Directory -Force -Path "src-tauri\bin" | Out-Null
 
-          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zip -UseBasicParsing
+          Write-Host "Downloading pinned llama.cpp Vulkan runtime: $downloadUrl"
+          Invoke-WebRequest -Uri $downloadUrl -OutFile $zip -UseBasicParsing
 
           if (-not (Test-Path $zip -PathType Leaf)) {
             throw "llama.cpp archive was not downloaded."
@@ -126,41 +100,26 @@ jobs:
 
           $zipHash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
           Write-Host "Downloaded archive SHA256: $zipHash"
-
-          if ($asset.digest) {
-            $expected = $asset.digest -replace "^sha256:", ""
-            if ($zipHash -ne $expected.ToLowerInvariant()) {
-              throw "llama.cpp archive checksum mismatch. Expected $expected, got $zipHash"
-            }
+          if ($zipHash -ne $expected) {
+            throw "llama.cpp archive checksum mismatch. Expected $expected, got $zipHash"
           }
 
           Expand-Archive -Path $zip -DestinationPath $dir -Force
 
-          $serverCandidates = @(Get-ChildItem $dir -Recurse -File -Filter "llama-server.exe" |
-            Sort-Object Length -Descending)
-
+          $serverCandidates = @(Get-ChildItem $dir -Recurse -File -Filter "llama-server.exe" | Sort-Object Length -Descending)
           if ($serverCandidates.Count -eq 0) {
-            throw "llama-server.exe was not found in the official Vulkan x64 release."
-          }
-
-          Write-Host "llama-server candidates:"
-          $serverCandidates | ForEach-Object {
-            Write-Host ("  {0} bytes  {1}" -f $_.Length, $_.FullName)
+            throw "llama-server.exe was not found in the pinned Vulkan x64 release."
           }
 
           $server = $serverCandidates | Select-Object -First 1
           Copy-Item $server.FullName "src-tauri\bin\llama-server-vulkan.exe" -Force
 
-          # The current official Vulkan bundle may ship llama-server.exe as a
-          # very small PE launcher with the implementation in adjacent DLLs.
-          # Validate it as PE instead of imposing an arbitrary file-size limit.
           $binary = Get-Item "src-tauri\bin\llama-server-vulkan.exe"
           $header = [System.IO.File]::ReadAllBytes($binary.FullName)
           if ($header.Length -lt 2 -or $header[0] -ne 0x4D -or $header[1] -ne 0x5A) {
             throw "llama-server-vulkan.exe is not a valid Windows PE executable."
           }
 
-          # Preserve all executable/runtime DLLs from the official package.
           Get-ChildItem $dir -Recurse -File |
             Where-Object { $_.Extension -in @(".dll", ".exe") } |
             ForEach-Object {
@@ -175,8 +134,7 @@ jobs:
           }
 
           Write-Host "Bundled llama runtime files:"
-          Get-ChildItem "src-tauri\bin" -File |
-            Sort-Object Name |
+          Get-ChildItem "src-tauri\bin" -File | Sort-Object Name |
             ForEach-Object { Write-Host ("  {0} bytes  {1}" -f $_.Length, $_.Name) }
 
           Write-Host "llama-server: $($binary.Length) bytes"
