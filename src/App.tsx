@@ -21,11 +21,25 @@ export default function App() {
   const [activeTab, setActiveTab] = useState("chat");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [animations, setAnimations] = useState(() => window.localStorage.getItem("infinitycoder.animations") !== "off");
+  const [reduceMotion, setReduceMotion] = useState(() => window.localStorage.getItem("infinitycoder.reduce-motion") === "on");
+  const [animationSpeed, setAnimationSpeed] = useState(() => Number(localStorage.getItem("infinitycoder.animation-speed") || "1"));
   const fileName = file?.split(/[\\/]/).pop() ?? "No file selected";
 
   const updateAnimations = (enabled: boolean) => {
     setAnimations(enabled);
     window.localStorage.setItem("infinitycoder.animations", enabled ? "on" : "off");
+    window.dispatchEvent(new Event("infinitycoder:animation-settings"));
+  };
+
+  const updateReduceMotion = (enabled: boolean) => {
+    setReduceMotion(enabled);
+    window.localStorage.setItem("infinitycoder.reduce-motion", enabled ? "on" : "off");
+    window.dispatchEvent(new Event("infinitycoder:animation-settings"));
+  };
+
+  const updateAnimationSpeed = (speed: number) => {
+    setAnimationSpeed(speed);
+    window.localStorage.setItem("infinitycoder.animation-speed", String(speed));
     window.dispatchEvent(new Event("infinitycoder:animation-settings"));
   };
 
@@ -195,6 +209,17 @@ export default function App() {
               <span><span className="block text-xs font-medium">Анимированные иконки</span><span className="block text-[10px] text-[#8b949e] mt-1">WebM-анимации в навигации, кнопках и статусах.</span></span>
               <input type="checkbox" checked={animations} onChange={e => updateAnimations(e.target.checked)} />
             </label>
+            <label className="flex items-center justify-between gap-4 rounded-xl border border-[#30363d] bg-[#0d1117] p-4 cursor-pointer">
+              <span><span className="block text-xs font-medium">Уменьшить движение</span><span className="block text-[10px] text-[#8b949e] mt-1">Отключает активную анимацию для более спокойного интерфейса.</span></span>
+              <input type="checkbox" checked={reduceMotion} onChange={e => updateReduceMotion(e.target.checked)} />
+            </label>
+            <div className="rounded-xl border border-[#30363d] bg-[#0d1117] p-4">
+              <div className="flex items-center justify-between mb-2"><span className="text-xs font-medium">Скорость анимаций</span><span className="text-[10px] text-[#8b949e]">{animationSpeed.toFixed(1)}×</span></div>
+              <input type="range" min="0.5" max="2" step="0.1" value={animationSpeed}
+                onChange={e => updateAnimationSpeed(Number(e.target.value))}
+                className="w-full accent-[#58a6ff]" />
+              <div className="mt-1 flex justify-between text-[9px] text-[#6e7681]"><span>0.5×</span><span>1×</span><span>2×</span></div>
+            </div>
             <div className="rounded-xl border border-[#30363d] bg-[#0d1117] p-4">
               <div className="text-xs font-medium mb-1">Субагенты</div>
               <div className="text-[10px] text-[#8b949e] leading-4">Planner → Builder → Reviewer → Tester. Режим обозначен как BETA и работает поверх тех же локальных инструментов.</div>
