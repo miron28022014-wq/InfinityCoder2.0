@@ -4,6 +4,7 @@ import { message } from "@tauri-apps/plugin-dialog";
 import { FileTree } from "./components/FileTree";
 import { Editor } from "./components/Editor";
 import { Chat } from "./components/Chat";
+import { ActivityBar } from "./components/ActivityBar";
 
 export default function App() {
   const [root, setRoot] = useState("");
@@ -16,7 +17,16 @@ export default function App() {
   const [treeVersion, setTreeVersion] = useState(0);
   const [notice, setNotice] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState("chat");
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [animations, setAnimations] = useState(() => window.localStorage.getItem("infinitycoder.animations") !== "off");
   const fileName = file?.split(/[\\/]/).pop() ?? "No file selected";
+
+  const updateAnimations = (enabled: boolean) => {
+    setAnimations(enabled);
+    window.localStorage.setItem("infinitycoder.animations", enabled ? "on" : "off");
+    window.dispatchEvent(new Event("infinitycoder:animation-settings"));
+  };
 
   const saveCurrentFile = useCallback(async (): Promise<boolean> => {
     if (!root || !file || !dirty) return true;
@@ -124,7 +134,7 @@ export default function App() {
   };
 
   return (
-    <main className="h-full flex flex-col overflow-hidden bg-[#0d1117] text-[#e6edf3] app-shell">
+    <main className="relative h-full flex flex-col overflow-hidden bg-[#0d1117] text-[#e6edf3] app-shell">
       <header className="h-12 shrink-0 border-b border-[#30363d] bg-[#161b22] flex items-center px-3 gap-3 select-none">
         <div className="flex items-center gap-2 min-w-[220px]">
           <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-[#58a6ff] to-[#8957e5] flex items-center justify-center text-white font-bold">∞</div>
@@ -157,6 +167,7 @@ export default function App() {
       </header>
 
       <div className="flex-1 min-h-0 flex animate-fade-in">
+        <ActivityBar activeId={activeTab} onSelect={(id) => { setActiveTab(id); if (id === "settings") setSettingsOpen(true); }} />
         <aside className="w-64 shrink-0 border-r border-[#30363d] bg-[#0d1117] overflow-hidden panel-surface"><FileTree rootPath={root} refreshToken={treeVersion} onSelectRoot={selectRoot} onSelectFile={selectFile} /></aside>
         <section className="flex-1 min-w-0 bg-[#0d1117] flex flex-col">
           {file && <div className="h-9 shrink-0 border-b border-[#30363d] bg-[#161b22] flex items-center justify-between">
@@ -171,6 +182,29 @@ export default function App() {
           <footer className="h-6 shrink-0 border-t border-[#30363d] bg-[#161b22] px-3 flex items-center justify-between text-[10px] text-[#8b949e]"><span>{file || "InfinityCoder workspace"}</span><span className="flex gap-4"><span>UTF-8</span><span>{busy ? "Working…" : "Local"}</span></span></footer>
         </section>
         <aside className="w-[420px] shrink-0 border-l border-[#30363d] bg-[#0d1117] overflow-hidden"><Chat workspaceRoot={root} openFilePath={file} openFileContent={content} /></aside>
+      </div>
+      {settingsOpen && <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/45 backdrop-blur-[2px] animate-fade-in" onMouseDown={(e) => { if (e.target === e.currentTarget) setSettingsOpen(false); }}>
+        <section className="w-[460px] max-w-[calc(100vw-32px)] rounded-2xl border border-[#30363d] bg-[#161b22] shadow-2xl overflow-hidden">
+          <div className="px-5 py-4 border-b border-[#30363d] flex items-center justify-between">
+            <div><div className="text-sm font-semibold">Настройки интерфейса</div><div className="text-[10px] text-[#8b949e] mt-1">InfinityCoder 2.0 · локальные настройки</div></div>
+            <button onClick={() => setSettingsOpen(false)} className="w-8 h-8 rounded-lg hover:bg-[#21262d] text-[#8b949e]">×</button>
+          </div>
+          <div className="p-5 space-y-4">
+            <label className="flex items-center justify-between gap-4 rounded-xl border border-[#30363d] bg-[#0d1117] p-4 cursor-pointer">
+              <span><span className="block text-xs font-medium">Анимированные иконки</span><span className="block text-[10px] text-[#8b949e] mt-1">WebM-анимации в навигации, кнопках и статусах.</span></span>
+              <input type="checkbox" checked={animations} onChange={e => updateAnimations(e.target.checked)} />
+            </label>
+            <div className="rounded-xl border border-[#30363d] bg-[#0d1117] p-4">
+              <div className="text-xs font-medium mb-1">Субагенты</div>
+              <div className="text-[10px] text-[#8b949e] leading-4">Planner → Builder → Reviewer → Tester. Режим обозначен как BETA и работает поверх тех же локальных инструментов.</div>
+            </div>
+            <div className="rounded-xl border border-[#30363d] bg-[#0d1117] p-4">
+              <div className="text-xs font-medium mb-1">Локальный AI</div>
+              <div className="text-[10px] text-[#8b949e] leading-4">Код и Ledger остаются на компьютере. Файл не требуется для обычного диалога.</div>
+            </div>
+          </div>
+          <div className="px-5 py-3 border-t border-[#30363d] flex justify-end"><button onClick={() => setSettingsOpen(false)} className="px-4 h-8 rounded-lg bg-[#238636] hover:bg-[#2ea043] text-xs font-medium">Готово</button></div>
+        </section>
       </div>
     </main>
   );
