@@ -149,3 +149,29 @@ button:not(:disabled):active {
   0%,100% { opacity: .35; transform: scale(.8); }
   50% { opacity: 1; transform: scale(1.2); }
 }
+
+
+.icon-fallback {
+  color: currentColor;
+  transition: transform .18s ease, opacity .18s ease, filter .18s ease;
+}
+.icon-hover:hover { transform: translateX(1px) scale(1.03); }
+.icon-active { transform: scale(1.06); filter: drop-shadow(0 0 5px rgba(88,166,255,.28)); }
+.icon-loop { animation: infinity-icon-loop 1.35s ease-in-out infinite; }
+.icon-once { animation: infinity-icon-once .55s ease-out both; }
+@keyframes infinity-icon-loop {
+  0%,100% { transform: rotate(0deg) scale(1); }
+  45% { transform: rotate(-5deg) scale(1.08); }
+  70% { transform: rotate(5deg) scale(1.08); }
+}
+@keyframes infinity-icon-once {
+  from { opacity: .45; transform: translateY(3px) scale(.92); }
+  55% { opacity: 1; transform: translateY(-1px) scale(1.08); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .animate-fade-in,
+  .icon-loop,
+  .icon-once,
+  button { animation: none !important; transition: none !important; }
+}
