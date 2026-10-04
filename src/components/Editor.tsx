@@ -1,38 +1,143 @@
-import { useEffect } from "react";
-import MonacoEditor from "@monaco-editor/react";
+import { useEffect, useState } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
+import { invoke } from "@tauri-apps/api/core";
+import { AnimatedIcon } from "./AnimatedIcon";
 
-function languageFor(path: string) {
-  const ext = path.split(".").pop()?.toLowerCase();
-  if (ext === "ts" || ext === "tsx") return "typescript";
-  if (ext === "js" || ext === "jsx") return "javascript";
-  if (ext === "rs") return "rust";
-  if (ext === "json") return "json";
-  if (ext === "md") return "markdown";
-  if (ext === "css") return "css";
-  if (ext === "html") return "html";
-  if (ext === "py") return "python";
-  return "plaintext";
+type Item = { name: string; path: string; is_dir: boolean };
+
+export function FileTree({ rootPath, refreshToken = 0, onSelectRoot, onSelectFile }: {
+  rootPath: string;
+  refreshToken?: number;
+  onSelectRoot: (p: string) => void;
+  onSelectFile: (p: string, c: string) => void;
+}) {
+  const [items, setItems] = useState<Item[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  const pick = async () => {
+    const path = await open({ directory: true, multiple: false });
+    if (typeof path === "string") {
+      await invoke("set_workspace_scope", { path });
+      onSelectRoot(path);
+    }
+  };
+
+  useEffect(() => {
+    if (!rootPath) return;
+
+    let active = true;
+    setLoading(true);
+
+    void invoke<Item[]>("list_dir", { workspace_root: rootPath, path: rootPath })
+      .then((next) => {
+        if (active) setItems(next);
+      })
+      .catch((error) => {
+        console.error("Failed to list root directory:", error);
+        if (active) setItems([]);
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [rootPath, refreshToken]);
+
+  if (!rootPath) {
+    return (
+      <div className="h-full p-4 bg-[#0d1117]">
+        <div className="text-[10px] uppercase tracking-widest text-[#8b949e] mb-3">Explorer</div>
+        <button
+          type="button"
+          onClick={() => void pick()}
+          className="w-full h-9 rounded-md border border-[#30363d] bg-[#161b22] hover:bg-[#21262d] hover:border-[#58a6ff]/60 transition text-sm font-medium flex items-center justify-center gap-2"
+        >
+          <span className="text-[#58a6ff]">＋</span> Open Project
+        </button>
+        <div className="mt-5 p-3 rounded-lg border border-dashed border-[#30363d] text-xs leading-5 text-[#8b949e]">
+          Your workspace stays on this PC. The local AI can work with its files and Ledger after a project is opened.
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="h-full flex flex-col bg-[#0d1117]">
+      <div className="h-10 shrink-0 px-3 border-b border-[#30363d] flex items-center justify-between">
+        <span className="text-[10px] uppercase tracking-widest text-[#8b949e]">Explorer</span>
+        <button type="button" onClick={() => void pick()} title="Open another project" className="w-6 h-6 rounded hover:bg-[#21262d] text-[#8b949e] hover:text-[#e6edf3]">+</button>
+      </div>
+
+      <div className="px-3 py-2 text-xs font-medium text-[#e6edf3] truncate flex items-center gap-2" title={rootPath}>
+        <AnimatedIcon name="computer" size={15} /> {rootPath.split(/[\\/]/).pop()}
+      </div>
+
+      <div className="flex-1 overflow-auto px-1">
+        {loading ? (
+          <div className="px-3 py-4 text-xs text-[#8b949e]">Loading workspace…</div>
+        ) : items.length ? (
+          items.map((item) => (
+            <Node key={item.path} item={item} root={rootPath} depth={0} select={onSelectFile} />
+          ))
+        ) : (
+          <div className="px-3 py-4 text-xs text-[#8b949e]">Workspace is empty.</div>
+        )}
+      </div>
+    </div>
+  );
 }
 
-export function Editor({ filePath, content, dirty, saving, onChange, onSave }: {
-  filePath: string | null; content: string; dirty: boolean; saving: boolean;
-  onChange: (s: string) => void; onSave: () => Promise<boolean>;
+function Node({ item, root, depth, select }: {
+  item: Item;
+  root: string;
+  depth: number;
+  select: (p: string, c: string) => void;
 }) {
-  useEffect(() => {
-    const handler = (event: KeyboardEvent) => {
-      if (!filePath) return;
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
-        event.preventDefault();
-        if (!saving && dirty) void onSave();
+  const [expanded, setExpanded] = useState(false);
+  const [children, setChildren] = useState<Item[]>([]);
+
+  const click = async () => {
+    if (item.is_dir) {
+      if (!children.length) {
+        try {
+          const nextChildren = await invoke<Item[]>("list_dir", { workspace_root: root, path: item.path });
+          setChildren(nextChildren);
+        } catch (error) {
+          console.error(`Failed to list directory: ${item.path}`, error);
+          setChildren([]);
+        }
       }
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [dirty, filePath, onSave, saving]);
+      setExpanded((value) => !value);
+      return;
+    }
 
-  if (!filePath) return <div className="h-full flex items-center justify-center bg-[#0d1117]"><div className="text-center max-w-sm px-6"><div className="mx-auto mb-4 w-16 h-16 rounded-2xl border border-[#30363d] bg-[#161b22] flex items-center justify-center text-3xl text-[#58a6ff]">∞</div><h1 className="text-lg font-semibold">InfinityCoder</h1><p className="mt-2 text-sm leading-6 text-[#8b949e]">Open a workspace and select a file to start coding with your local AI.</p></div></div>;
+    try {
+      const content = await invoke<string>("read_file", { workspace_root: root, path: item.path });
+      select(item.path, content);
+    } catch (error) {
+      console.error(`Failed to read file: ${item.path}`, error);
+    }
+  };
 
-  return <MonacoEditor height="100%" theme="vs-dark" language={languageFor(filePath)} value={content}
-    onChange={v => onChange(v ?? "")}
-    options={{ automaticLayout:true, minimap:{enabled:true}, fontSize:13, lineHeight:21, padding:{top:12,bottom:12}, smoothScrolling:true, cursorSmoothCaretAnimation:"on", scrollBeyondLastLine:false, renderWhitespace:"selection", bracketPairColorization:{enabled:true}, guides:{indentation:true, bracketPairs:true} }} />;
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => void click()}
+        className="w-full text-left py-1 px-2 rounded hover:bg-[#161b22] text-xs text-[#c9d1d9] flex items-center gap-1.5"
+        style={{ paddingLeft: 8 + depth * 14 }}
+      >
+        <span className="w-3 text-[#8b949e]">{item.is_dir ? (expanded ? "▾" : "▸") : "·"}</span>
+        <span className="truncate flex items-center gap-1.5">
+          <AnimatedIcon name={item.is_dir ? "computer" : "document"} size={15} />
+          {item.name}
+        </span>
+      </button>
+      {expanded && children.map((child) => (
+        <Node key={child.path} item={child} root={root} depth={depth + 1} select={select} />
+      ))}
+    </>
+  );
 }
