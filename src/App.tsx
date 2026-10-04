@@ -5,6 +5,7 @@ import { FileTree } from "./components/FileTree";
 import { Editor } from "./components/Editor";
 import { Chat } from "./components/Chat";
 import { ActivityBar } from "./components/ActivityBar";
+import { AnimatedIcon } from "./components/AnimatedIcon";
 
 export default function App() {
   const [root, setRoot] = useState("");
@@ -149,20 +150,20 @@ export default function App() {
         </div>
         {menuOpen && <div className="app-menu">
           <div className="app-menu-title">Quick actions</div>
-          <button onClick={() => { setMenuOpen(false); void createNewFile(); }} disabled={!root || busy}>＋ New file</button>
-          <button onClick={() => { setMenuOpen(false); void build(); }} disabled={!root || busy}>🔨 Build</button>
-          <button onClick={() => { setMenuOpen(false); void run(); }} disabled={!root || busy}>▶ Run</button>
-          <button onClick={() => { setMenuOpen(false); void buildAndMaybeRun(); }} disabled={!root || busy}>⚡ Build & Run</button>
+          <button onClick={() => { setMenuOpen(false); void createNewFile(); }} disabled={!root || busy}><AnimatedIcon name="document" size={16} /> New file</button>
+          <button onClick={() => { setMenuOpen(false); void build(); }} disabled={!root || busy}><AnimatedIcon name="computer" size={16} /> Build</button>
+          <button onClick={() => { setMenuOpen(false); void run(); }} disabled={!root || busy}><AnimatedIcon name="right-arrow" size={16} /> Run</button>
+          <button onClick={() => { setMenuOpen(false); void buildAndMaybeRun(); }} disabled={!root || busy}><AnimatedIcon name="verified" size={16} /> Build & Run</button>
         </div>}
         <div className="flex items-center gap-1.5">
           {notice && <span className="text-[10px] text-[#3fb950] animate-fade-in">{notice}</span>}
-          <button onClick={createNewFile} disabled={!root || busy} title="Create a new file" className="h-8 px-2.5 rounded-md border border-[#30363d] hover:bg-[#21262d] disabled:opacity-40 text-xs transition-all duration-200">＋ File</button>
-          <button onClick={build} disabled={!root || busy} title="Compile project" className="h-8 px-2.5 rounded-md border border-[#30363d] hover:bg-[#21262d] disabled:opacity-40 text-xs">🔨 Build</button>
-          <button onClick={run} disabled={!root || busy} title="Run project" className="h-8 px-2.5 rounded-md border border-[#30363d] hover:bg-[#21262d] disabled:opacity-40 text-xs">▶ Run</button>
+          <button onClick={createNewFile} disabled={!root || busy} title="Create a new file" className="h-8 px-2.5 rounded-md border border-[#30363d] hover:bg-[#21262d] disabled:opacity-40 text-xs transition-all duration-200"><AnimatedIcon name="document" size={16} /> File</button>
+          <button onClick={build} disabled={!root || busy} title="Compile project" className="h-8 px-2.5 rounded-md border border-[#30363d] hover:bg-[#21262d] disabled:opacity-40 text-xs"><AnimatedIcon name="computer" size={16} /> Build</button>
+          <button onClick={run} disabled={!root || busy} title="Run project" className="h-8 px-2.5 rounded-md border border-[#30363d] hover:bg-[#21262d] disabled:opacity-40 text-xs"><AnimatedIcon name="right-arrow" size={16} /> Run</button>
           <label className="h-8 px-2 flex items-center gap-1.5 text-[10px] text-[#8b949e]" title="Automatically run after a successful build">
             <input type="checkbox" checked={autoRun} onChange={e => setAutoRun(e.target.checked)} /> Auto
           </label>
-          <button onClick={buildAndMaybeRun} disabled={!root || busy} title="Build, then automatically run (Ctrl+F5)" className="h-8 px-2.5 rounded-md bg-[#238636] hover:bg-[#2ea043] disabled:opacity-40 text-xs font-medium">⚡ Build & Run</button>
+          <button onClick={buildAndMaybeRun} disabled={!root || busy} title="Build, then automatically run (Ctrl+F5)" className="h-8 px-2.5 rounded-md bg-[#238636] hover:bg-[#2ea043] disabled:opacity-40 text-xs font-medium"><AnimatedIcon name="verified" size={16} /> Build & Run</button>
         </div>
       </header>
 
