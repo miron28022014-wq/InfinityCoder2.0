@@ -2,6 +2,9 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useAI } from "../hooks/useAI";
 import { SYSTEM_PROMPT } from "../lib/systemPrompt";
+import { AnimatedIcon } from "./AnimatedIcon";
+import { ThinkingIndicator } from "./ThinkingIndicator";
+import { ChatEmptyState } from "./ChatEmptyState";
 
 export function Chat({ workspaceRoot, openFilePath, openFileContent }: {
   workspaceRoot: string; openFilePath: string | null; openFileContent: string;
@@ -54,7 +57,7 @@ export function Chat({ workspaceRoot, openFilePath, openFileContent }: {
     <div className="h-full flex flex-col bg-[#0d1117]">
       <div className="h-12 shrink-0 px-4 border-b border-[#30363d] flex items-center justify-between bg-[#161b22]">
         <div className="flex items-center gap-2 text-xs font-semibold">
-          <span className="text-[#58a6ff]">✦</span>
+          <AnimatedIcon name="chat" size={18} mode="hover" active />
           <span>AI Agent</span>
           {subagents && <span className="beta-pill">BETA</span>}
         </div>
@@ -66,8 +69,8 @@ export function Chat({ workspaceRoot, openFilePath, openFileContent }: {
 
       <div className="px-3 py-2 border-b border-[#21262d] bg-[#0d1117]">
         <div className="agent-mode">
-          <button className={!subagents ? "agent-mode-active" : ""} onClick={() => setSubagents(false)}>⚡ Direct</button>
-          <button className={subagents ? "agent-mode-active" : ""} onClick={() => setSubagents(true)}>🧩 Subagents <span className="beta-pill">BETA</span></button>
+          <button className={!subagents ? "agent-mode-active" : ""} onClick={() => setSubagents(false)}><AnimatedIcon name="home" size={16} /> Direct</button>
+          <button className={subagents ? "agent-mode-active" : ""} onClick={() => setSubagents(true)}><AnimatedIcon name="computer" size={16} /> Subagents <span className="beta-pill">BETA</span></button>
         </div>
         {subagents && (
           <div className="mt-2 text-[10px] leading-4 text-[#8b949e]">
@@ -77,12 +80,12 @@ export function Chat({ workspaceRoot, openFilePath, openFileContent }: {
       </div>
 
       <div className="flex-1 overflow-auto p-4">
-        {!workspaceRoot && (
-          <div className="mb-4 rounded-xl border border-[#30363d] bg-[#161b22] p-4 shadow-lg">
-            <div className="text-[#e6edf3] font-medium mb-1">AI уже готов к диалогу</div>
-            <div className="text-xs leading-5 text-[#8b949e]">
-              Файл выбирать не обязательно. Можно общаться с локальным AI прямо сейчас. Чтобы AI мог создавать, изменять, собирать и запускать файлы, открой проект через Explorer.
-            </div>
+        {messages.length === 0 && !streaming && (
+          <div className="h-full min-h-[320px]">
+            <ChatEmptyState
+              hasOpenFile={!!openFilePath}
+              onPick={setInput}
+            />
           </div>
         )}
 
@@ -93,16 +96,16 @@ export function Chat({ workspaceRoot, openFilePath, openFileContent }: {
           </div>
         ))}
 
-        {streaming && (
+        {streaming && !live && (
+          <div className="mb-4"><ThinkingIndicator label={subagents ? `Субагент: ${phase || "запуск"}…` : "InfinityCoder думает…"} /></div>
+        )}
+        {streaming && live && (
           <div className="mb-4 rounded-xl border border-[#58a6ff]/30 bg-[#101923] p-3 animate-fade-in">
             <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-[#8b949e] mb-2">
-              <span>InfinityCoder · {phase || "working"}</span>
+              <span className="flex items-center gap-2"><AnimatedIcon name="chat" size={16} /> InfinityCoder · {phase || "working"}</span>
               <span className="text-[#58a6ff]">● LIVE</span>
             </div>
-            <div className="text-sm leading-6 whitespace-pre-wrap">
-              {live || "Thinking…"}
-              <span className="inline-block w-1.5 h-4 ml-1 bg-[#58a6ff] animate-pulse align-middle" />
-            </div>
+            <div className="text-sm leading-6 whitespace-pre-wrap">{live}<span className="inline-block w-1.5 h-4 ml-1 bg-[#58a6ff] animate-pulse align-middle" /></div>
           </div>
         )}
       </div>
@@ -116,7 +119,7 @@ export function Chat({ workspaceRoot, openFilePath, openFileContent }: {
             placeholder={ready ? (subagents ? "Опиши задачу — субагенты выполнят её…" : "Скажи, что нужно сделать…") : "AI engine is loading…"} />
           <button onClick={() => void send()} disabled={!ready || streaming || !input.trim()}
             className="absolute right-2 bottom-9 w-8 h-8 rounded-lg bg-[#238636] hover:bg-[#2ea043] disabled:opacity-30 text-sm transition-all"
-            title="Send">↑</button>
+            title="Send"><AnimatedIcon name="right-arrow" size={18} mode="hover" active /></button>
           <div className="px-3 pb-2 flex items-center justify-between text-[10px] text-[#6e7681]">
             <span>Enter — отправить · Shift+Enter — новая строка</span>
             <span>{input.length}</span>
