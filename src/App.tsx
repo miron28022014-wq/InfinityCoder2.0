@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { message } from "@tauri-apps/plugin-dialog";
-import { ActivityBar } from "./components/ActivityBar";
 import { AnimatedIcon } from "./components/AnimatedIcon";
 import { Chat } from "./components/Chat";
 import { Editor } from "./components/Editor";
 import { FileTree } from "./components/FileTree";
+import { TabBar } from "./components/TabBar";
 
 const readStorage = (key: string, fallback: string) => {
   if (typeof window === "undefined") return fallback;
@@ -26,9 +26,12 @@ const readStorageNumber = (key: string, fallback: number) => {
   return Number.isFinite(value) ? value : fallback;
 };
 
+type OpenFile = { path: string; content: string };
+
 export default function App() {
   const [root, setRoot] = useState("");
-  const [file, setFile] = useState<string | null>(null);
+  const [openFiles, setOpenFiles] = useState<OpenFile[]>([]);
+  const [activeFilePath, setActiveFilePath] = useState<string | null>(null);
   const [content, setContent] = useState("");
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -36,24 +39,22 @@ export default function App() {
   const [autoRun, setAutoRun] = useState(() => readStorageBoolean("infinitycoder.auto-run", true));
   const [treeVersion, setTreeVersion] = useState(0);
   const [notice, setNotice] = useState("");
-  const [activeTab, setActiveTab] = useState("chat");
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [sidebarView, setSidebarView] = useState<"explorer" | "search" | "settings">("explorer");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const [animations, setAnimations] = useState(() => readStorageBoolean("infinitycoder.animations", true));
   const [reduceMotion, setReduceMotion] = useState(() => readStorageBoolean("infinitycoder.reduce-motion", false));
   const [animationSpeed, setAnimationSpeed] = useState(() => readStorageNumber("infinitycoder.animation-speed", 1));
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [chatCollapsed, setChatCollapsed] = useState(false);
 
-  const fileName = useMemo(() => file?.split(/[\\/]/).pop() ?? "No file selected", [file]);
+  const fileName = useMemo(() => activeFilePath?.split(/[\\/]/).pop() ?? null, [activeFilePath]);
+  const activeFile = useMemo(() => openFiles.find((f) => f.path === activeFilePath), [openFiles, activeFilePath]);
 
   const persist = (key: string, value: string) => {
     if (typeof window === "undefined") return;
     try {
       window.localStorage.setItem(key, value);
       window.dispatchEvent(new Event("infinitycoder:animation-settings"));
-    } catch {
-      // Ignore storage quota issues gracefully.
-    }
+    } catch {}
   };
 
   const updateAnimations = (enabled: boolean) => {
@@ -73,75 +74,73 @@ export default function App() {
   };
 
   const saveCurrentFile = useCallback(async (): Promise<boolean> => {
-    if (!root || !file || !dirty) return true;
+    if (!root || !activeFilePath || !dirty) return true;
 
     try {
-      await invoke("save_file", { workspace_root: root, path: file, content });
+      await invoke("save_file", { workspace_root: root, path: activeFilePath, content });
       setDirty(false);
       return true;
     } catch (error) {
-      await message(`Не удалось сохранить «${fileName}».\n\n${String(error)}`, {
-        title: "InfinityCoder — ошибка сохранения",
+      await message(`Failed to save file.\n\n${String(error)}`, {
+        title: "InfinityCoder — Save Error",
         kind: "error",
       });
       return false;
     }
-  }, [content, dirty, file, fileName, root]);
+  }, [content, dirty, activeFilePath, root]);
 
-  const createNewFile = useCallback(async () => {
-    if (!root || busy) return;
-
-    const raw = window.prompt("Имя нового файла (например src/App.tsx):", "src/new-file.ts");
-    const path = raw?.trim();
-    if (!path) return;
-
-    try {
-      await invoke("save_file", { workspace_root: root, path, content: "" });
-      const absolute = /^[A-Za-z]:[\\/]/.test(path) ? path : `${root.replace(/[\\/]$/, "")}/${path}`;
-      setTreeVersion((value) => value + 1);
-      setFile(absolute);
+  const closeFile = (path: string) => {
+    setOpenFiles((prev) => prev.filter((f) => f.path !== path));
+    if (activeFilePath === path) {
+      const remaining = openFiles.filter((f) => f.path !== path);
+      setActiveFilePath(remaining.length > 0 ? remaining[0].path : null);
       setContent("");
       setDirty(false);
-      setNotice("Файл создан");
-      window.setTimeout(() => setNotice(""), 1800);
-    } catch (error) {
-      await message(String(error), {
-        title: "InfinityCoder — ошибка создания файла",
-        kind: "error",
-      });
     }
-  }, [busy, root]);
+  };
 
-  const selectFile = useCallback(async (path: string, nextContent: string) => {
-    if (dirty) {
-      const save = window.confirm(`«${fileName}» изменён. Сохранить перед открытием другого файла?`);
-      if (save && !(await saveCurrentFile())) return;
-    }
+  const openFile = useCallback(
+    async (path: string, fileContent: string) => {
+      if (dirty && activeFilePath) {
+        const save = window.confirm("Save current file before opening another?");
+        if (save && !(await saveCurrentFile())) return;
+      }
 
-    setFile(path);
-    setContent(nextContent);
-    setDirty(false);
-  }, [dirty, fileName, saveCurrentFile]);
+      const existing = openFiles.find((f) => f.path === path);
+      if (!existing) {
+        setOpenFiles((prev) => [...prev, { path, content: fileContent }]);
+      }
 
-  const selectRoot = useCallback(async (path: string) => {
-    if (dirty) {
-      const save = window.confirm(`«${fileName}» изменён. Сохранить перед сменой проекта?`);
-      if (save && !(await saveCurrentFile())) return;
-    }
+      setActiveFilePath(path);
+      setContent(fileContent);
+      setDirty(false);
+    },
+    [activeFilePath, dirty, openFiles, saveCurrentFile]
+  );
 
-    setRoot(path);
-    setFile(null);
-    setContent("");
-    setDirty(false);
-    setOutput("");
-  }, [dirty, fileName, saveCurrentFile]);
+  const selectRoot = useCallback(
+    async (path: string) => {
+      if (dirty) {
+        const save = window.confirm("Save current file before changing workspace?");
+        if (save && !(await saveCurrentFile())) return;
+      }
+
+      setRoot(path);
+      setOpenFiles([]);
+      setActiveFilePath(null);
+      setContent("");
+      setDirty(false);
+      setOutput("");
+    },
+    [dirty, saveCurrentFile]
+  );
 
   const build = useCallback(async () => {
     if (!root || busy) return;
     if (!(await saveCurrentFile())) return;
 
     setBusy(true);
-    setOutput("Compiling…");
+    setOutput("Building...");
 
     try {
       const result = await invoke<string>("build_project", { workspace_root: root });
@@ -149,7 +148,7 @@ export default function App() {
     } catch (error) {
       const text = String(error);
       setOutput(text);
-      await message(text, { title: "InfinityCoder — compilation failed", kind: "error" });
+      await message(text, { title: "Build Failed", kind: "error" });
     } finally {
       setBusy(false);
     }
@@ -160,7 +159,7 @@ export default function App() {
     if (!(await saveCurrentFile())) return;
 
     setBusy(true);
-    setOutput("Starting project…");
+    setOutput("Running project...");
 
     try {
       const result = await invoke<string>("run_project", { workspace_root: root });
@@ -168,7 +167,7 @@ export default function App() {
     } catch (error) {
       const text = String(error);
       setOutput(text);
-      await message(text, { title: "InfinityCoder — run failed", kind: "error" });
+      await message(text, { title: "Run Failed", kind: "error" });
     } finally {
       setBusy(false);
     }
@@ -179,7 +178,7 @@ export default function App() {
     if (!(await saveCurrentFile())) return;
 
     setBusy(true);
-    setOutput(autoRun ? "Compiling and starting…" : "Compiling…");
+    setOutput(autoRun ? "Building and running..." : "Building...");
 
     try {
       const command = autoRun ? "build_and_run_project" : "build_project";
@@ -188,7 +187,7 @@ export default function App() {
     } catch (error) {
       const text = String(error);
       setOutput(text);
-      await message(text, { title: "InfinityCoder — build failed", kind: "error" });
+      await message(text, { title: "Build Failed", kind: "error" });
     } finally {
       setBusy(false);
     }
@@ -212,272 +211,209 @@ export default function App() {
   }, [buildAndMaybeRun, busy, root, saveCurrentFile]);
 
   return (
-    <main className="relative h-screen w-screen overflow-hidden bg-gradient-to-br from-[#0f0f1e] via-[#1a1a2e] to-[#0f0f1e] text-[#e0e0ff]">
-      {/* Top Navigation Bar */}
-      <header className="h-14 shrink-0 border-b border-[#2a2a4e] bg-[#0f0f1e]/80 backdrop-blur-sm flex items-center px-4 gap-4 select-none shadow-lg">
-        <div className="flex items-center gap-3 min-w-fit">
-          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-[#6366f1] via-[#a855f7] to-[#ec4899] flex items-center justify-center text-white font-bold text-lg shadow-lg">
-            ∞
-          </div>
-          <div className="hidden sm:block">
-            <div className="text-sm font-bold leading-none tracking-wide">InfinityCoder</div>
-            <div className="text-xs text-[#9090c0] mt-0.5">Local AI IDE · v2.0</div>
-          </div>
+    <main className="h-screen w-screen flex flex-col bg-gradient-to-br from-[#0a0e27] via-[#111c3f] to-[#0d0d1a] text-[#c5d4e6]">
+      {/* Top Bar */}
+      <header className="h-12 shrink-0 border-b border-white/5 bg-[#0a0e27]/70 backdrop-blur-xl flex items-center px-4 gap-4 select-none">
+        <div className="flex items-center gap-3">
+          <div className="w-6 h-6 rounded-md bg-gradient-to-br from-[#5e7ce2] to-[#7c5cdb] flex items-center justify-center text-white font-bold text-xs">∞</div>
+          <span className="text-sm font-semibold tracking-tight hidden sm:inline">InfinityCoder</span>
         </div>
 
         <div className="flex-1 flex items-center justify-center">
-          <div className="flex items-center gap-2 text-xs text-[#7070a0] px-3 py-1.5 rounded-lg bg-[#1a1a2e] border border-[#2a2a4e] max-w-md truncate">
-            <div className="w-2 h-2 rounded-full bg-gradient-to-r from-[#6366f1] to-[#ec4899] animate-pulse" />
-            {root ? root.split(/[\\/]/).pop() : "No workspace selected"}
-          </div>
+          {root && (
+            <div className="text-xs text-[#8795b8] px-2 py-1 rounded-md bg-[#111c3f]/50">{root.split(/[\\/]/).pop()}</div>
+          )}
         </div>
 
         <div className="flex items-center gap-2">
-          {notice && (
-            <span className="text-xs text-[#10b981] animate-fade-in font-medium px-2 py-1 rounded-md bg-[#10b981]/10 border border-[#10b981]/30">
-              ✓ {notice}
-            </span>
-          )}
-          <button
-            type="button"
-            onClick={() => void createNewFile()}
-            disabled={!root || busy}
-            title="Create new file (Ctrl+N)"
-            className="px-3 py-1.5 text-xs font-medium rounded-lg border border-[#2a2a4e] bg-[#1a1a2e] hover:bg-[#252550] disabled:opacity-40 hover:border-[#6366f1] transition-all duration-200"
-          >
-            + New
-          </button>
+          {notice && <span className="text-xs text-emerald-400 font-medium">✓ {notice}</span>}
           <button
             type="button"
             onClick={() => void build()}
             disabled={!root || busy}
-            title="Build project (Ctrl+Shift+B)"
-            className="px-3 py-1.5 text-xs font-medium rounded-lg border border-[#2a2a4e] bg-[#1a1a2e] hover:bg-[#252550] disabled:opacity-40 hover:border-[#6366f1] transition-all duration-200"
+            title="Build (Ctrl+Shift+B)"
+            className="px-2.5 py-1.5 text-xs font-medium rounded-lg border border-white/10 bg-white/5 hover:bg-white/10 disabled:opacity-30 transition-colors duration-200"
           >
-            ⚙ Build
+            Build
           </button>
           <button
             type="button"
             onClick={() => void buildAndMaybeRun()}
             disabled={!root || busy}
-            title="Build & Run (F5)"
-            className="px-3 py-1.5 text-xs font-medium rounded-lg bg-gradient-to-r from-[#6366f1] to-[#a855f7] hover:from-[#7c3aed] hover:to-[#d946ef] disabled:opacity-40 text-white transition-all duration-200 shadow-lg hover:shadow-xl"
+            title="Run (F5)"
+            className="px-2.5 py-1.5 text-xs font-medium rounded-lg bg-gradient-to-r from-[#5e7ce2] to-[#7c5cdb] hover:from-[#6f8df2] hover:to-[#8d6deb] disabled:opacity-30 text-white transition-all duration-200"
           >
-            ▶ Run
+            {busy ? "Running..." : "Run"}
           </button>
         </div>
       </header>
 
-      {/* Main Content Area */}
+      {/* Main Content */}
       <div className="flex-1 min-h-0 flex">
         {/* Left Sidebar */}
         <div
-          className={`shrink-0 border-r border-[#2a2a4e] bg-[#0f0f1e] transition-all duration-300 overflow-hidden ${
+          className={`shrink-0 border-r border-white/5 bg-[#0a0e27] transition-all duration-300 overflow-hidden flex flex-col ${
             sidebarCollapsed ? "w-0" : "w-72"
           }`}
         >
-          <FileTree
-            rootPath={root}
-            refreshToken={treeVersion}
-            onSelectRoot={selectRoot}
-            onSelectFile={selectFile}
-          />
-        </div>
-
-        {/* Toggle Sidebar Button */}
-        <button
-          type="button"
-          onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
-          className="w-1 hover:w-1.5 bg-[#2a2a4e] hover:bg-[#6366f1] transition-all duration-200 cursor-col-resize group"
-          title={sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}
-        />
-
-        {/* Editor and Output */}
-        <section className="flex-1 min-w-0 bg-[#0f0f1e] flex flex-col">
-          {/* File Tabs */}
-          {file && (
-            <div className="h-11 shrink-0 border-b border-[#2a2a4e] bg-[#0f0f1e]/50 backdrop-blur-sm flex items-center px-4 gap-3">
-              <div className="flex-1 flex items-center gap-2 min-w-0">
-                <span className="text-[#6366f1] font-bold">●</span>
-                <span className="text-sm text-[#e0e0ff] truncate">{fileName}</span>
-                {dirty && (
-                  <span className="text-[#f59e0b] ml-1 font-bold" title="Unsaved changes">
-                    ⚪
-                  </span>
-                )}
-              </div>
-              <div className="flex items-center gap-2">
-                {dirty && (
-                  <button
-                    type="button"
-                    onClick={() => void saveCurrentFile()}
-                    disabled={busy}
-                    className="px-2 py-1 text-xs rounded-md border border-[#2a2a4e] bg-[#1a1a2e] hover:bg-[#252550] hover:border-[#10b981] disabled:opacity-40 transition-all"
-                  >
-                    ✓ Save
-                  </button>
-                )}
+          {/* Sidebar Header */}
+          <div className="h-12 shrink-0 px-4 border-b border-white/5 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <div
+                className={`w-5 h-5 rounded-md flex items-center justify-center text-xs cursor-pointer transition-colors ${
+                  sidebarView === "explorer" ? "bg-[#5e7ce2] text-white" : "text-[#8795b8] hover:text-[#c5d4e6]"
+                }`}
+                onClick={() => setSidebarView("explorer")}
+              >
+                📁
               </div>
             </div>
+            <button
+              type="button"
+              onClick={() => setSidebarCollapsed(true)}
+              className="text-[#8795b8] hover:text-[#c5d4e6] transition-colors text-sm"
+            >
+              ‹
+            </button>
+          </div>
+
+          {/* Sidebar Content */}
+          <div className="flex-1 overflow-y-auto">
+            {sidebarView === "explorer" && (
+              <FileTree rootPath={root} refreshToken={treeVersion} onSelectRoot={selectRoot} onSelectFile={openFile} />
+            )}
+          </div>
+        </div>
+
+        {/* Sidebar Toggle */}
+        {sidebarCollapsed && (
+          <button
+            type="button"
+            onClick={() => setSidebarCollapsed(false)}
+            className="w-0.5 hover:w-1 bg-white/5 hover:bg-[#5e7ce2] transition-all duration-200 cursor-col-resize"
+            title="Show sidebar"
+          />
+        )}
+
+        {/* Editor Area */}
+        <section className="flex-1 min-w-0 flex flex-col bg-[#0d0d1a]">
+          {/* Tab Bar */}
+          {openFiles.length > 0 && (
+            <TabBar files={openFiles} activeFile={activeFilePath} onSelectFile={setActiveFilePath} onCloseFile={closeFile} />
           )}
 
           {/* Editor */}
-          <div className="flex-1 min-h-0 relative">
-            <Editor
-              filePath={file}
-              content={content}
-              dirty={dirty}
-              saving={busy}
-              onChange={(value) => {
-                setContent(value);
-                setDirty(true);
-              }}
-              onSave={saveCurrentFile}
-            />
+          <div className="flex-1 min-h-0">
+            {activeFilePath ? (
+              <Editor
+                filePath={activeFilePath}
+                content={content}
+                dirty={dirty}
+                saving={busy}
+                onChange={(value) => {
+                  setContent(value);
+                  setDirty(true);
+                }}
+                onSave={saveCurrentFile}
+              />
+            ) : (
+              <div className="h-full flex items-center justify-center bg-gradient-to-br from-[#0a0e27] to-[#0d0d1a] text-center">
+                <div>
+                  <div className="w-12 h-12 rounded-lg bg-white/5 flex items-center justify-center mx-auto mb-3">+</div>
+                  <p className="text-sm text-[#8795b8]">Open a file to start editing</p>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Output Terminal */}
           {output && (
-            <div className="h-40 shrink-0 border-t border-[#2a2a4e] bg-[#0a0a14] flex flex-col">
-              <div className="px-4 py-2 border-b border-[#2a2a4e] bg-[#0f0f1e] flex items-center justify-between">
-                <span className="text-xs font-semibold text-[#9090c0] uppercase tracking-widest">Terminal Output</span>
-                <button
-                  type="button"
-                  onClick={() => setOutput("")}
-                  className="text-xs text-[#7070a0] hover:text-[#e0e0ff] transition-colors"
-                >
+            <div className="h-48 shrink-0 border-t border-white/5 bg-[#050811] flex flex-col">
+              <div className="px-4 py-2 border-b border-white/5 flex items-center justify-between">
+                <span className="text-xs font-semibold text-[#8795b8] uppercase tracking-widest">Terminal</span>
+                <button type="button" onClick={() => setOutput("")} className="text-[#8795b8] hover:text-[#c5d4e6]">
                   ✕
                 </button>
               </div>
-              <pre className="flex-1 overflow-auto p-4 text-xs leading-relaxed text-[#10b981] font-mono whitespace-pre-wrap break-words">
+              <pre className="flex-1 overflow-auto p-3 text-xs leading-relaxed text-emerald-400 font-mono whitespace-pre-wrap break-words">
                 {output}
               </pre>
             </div>
           )}
 
           {/* Status Bar */}
-          <footer className="h-8 shrink-0 border-t border-[#2a2a4e] bg-[#0f0f1e] px-4 flex items-center justify-between text-xs text-[#7070a0]">
-            <span>{file || "InfinityCoder Workspace"}</span>
+          <footer className="h-8 shrink-0 border-t border-white/5 bg-[#0a0e27] px-4 flex items-center justify-between text-xs text-[#8795b8]">
+            <span>{fileName || "No file"}</span>
             <span className="flex items-center gap-2">
-              {busy && (
-                <span className="flex items-center gap-1 text-[#f59e0b]">
-                  <span className="inline-block w-1.5 h-1.5 rounded-full bg-[#f59e0b] animate-pulse" />
+              {busy ? (
+                <span className="flex items-center gap-1 text-amber-400">
+                  <span className="w-1 h-1 rounded-full bg-amber-400 animate-pulse" />
                   Processing…
                 </span>
+              ) : dirty ? (
+                <span className="text-amber-400">●</span>
+              ) : (
+                <span className="text-emerald-400">✓</span>
               )}
-              {!busy && dirty && <span className="text-[#f59e0b]">●</span>}
-              {!busy && !dirty && <span className="text-[#10b981]">✓ Ready</span>}
             </span>
           </footer>
         </section>
+      </div>
 
-        {/* Toggle Chat Button */}
-        <button
-          type="button"
-          onClick={() => setChatCollapsed(!chatCollapsed)}
-          className="w-1 hover:w-1.5 bg-[#2a2a4e] hover:bg-[#a855f7] transition-all duration-200 cursor-col-resize group"
-          title={chatCollapsed ? "Show chat" : "Hide chat"}
-        />
-
-        {/* Right Sidebar - Chat */}
-        <div
-          className={`shrink-0 border-l border-[#2a2a4e] bg-[#0f0f1e] transition-all duration-300 overflow-hidden flex flex-col ${
-            chatCollapsed ? "w-0" : "w-96"
-          }`}
-        >
-          <div className="h-11 shrink-0 border-b border-[#2a2a4e] bg-[#0f0f1e]/50 backdrop-blur-sm px-4 flex items-center justify-between">
-            <div className="flex items-center gap-2 text-xs font-semibold text-[#e0e0ff]">
-              <div className="w-2 h-2 rounded-full bg-gradient-to-r from-[#a855f7] to-[#ec4899] animate-pulse" />
-              AI Agent
-            </div>
-            <button type="button" onClick={() => setChatCollapsed(true)} className="text-[#7070a0] hover:text-[#e0e0ff]">
-              ✕
-            </button>
-          </div>
-          <div className="flex-1 overflow-hidden">
-            <Chat workspaceRoot={root} openFilePath={file} openFileContent={content} />
-          </div>
-        </div>
+      {/* Chat Panel - Always on right */}
+      <div className="absolute right-0 top-12 bottom-0 w-96 border-l border-white/5 bg-[#0a0e27]/70 backdrop-blur-xl flex flex-col shadow-2xl">
+        <Chat workspaceRoot={root} openFilePath={activeFilePath} openFileContent={content} />
       </div>
 
       {/* Settings Modal */}
-      {settingsOpen && (
+      {showSettings && (
         <div
-          className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-md animate-fade-in"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) setSettingsOpen(false);
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setShowSettings(false);
           }}
         >
-          <div className="w-[520px] max-w-[calc(100vw-32px)] rounded-2xl border border-[#2a2a4e] bg-[#0f0f1e] shadow-2xl overflow-hidden">
-            <div className="px-6 py-4 border-b border-[#2a2a4e] flex items-center justify-between bg-gradient-to-r from-[#6366f1]/10 to-[#a855f7]/10">
-              <div>
-                <h2 className="text-lg font-bold text-[#e0e0ff]">Settings</h2>
-                <p className="text-xs text-[#7070a0] mt-1">InfinityCoder Preferences</p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setSettingsOpen(false)}
-                className="w-8 h-8 rounded-lg hover:bg-[#252550] text-[#7070a0] hover:text-[#e0e0ff] transition-colors"
-              >
+          <div className="w-96 max-w-[calc(100vw-32px)] rounded-xl border border-white/10 bg-[#0a0e27] shadow-2xl overflow-hidden">
+            <div className="px-6 py-4 border-b border-white/5 flex items-center justify-between">
+              <h2 className="text-sm font-semibold text-[#c5d4e6]">Settings</h2>
+              <button type="button" onClick={() => setShowSettings(false)} className="text-[#8795b8] hover:text-[#c5d4e6]">
                 ✕
               </button>
             </div>
 
-            <div className="p-6 space-y-4 max-h-[60vh] overflow-y-auto">
-              {/* Animation Settings */}
-              <div className="space-y-3">
-                <h3 className="text-sm font-semibold text-[#e0e0ff]">Animations</h3>
-                <label className="flex items-center justify-between gap-4 p-3 rounded-lg border border-[#2a2a4e] bg-[#1a1a2e] hover:border-[#6366f1] cursor-pointer transition-colors">
-                  <span className="text-sm">Enable animations</span>
-                  <input type="checkbox" checked={animations} onChange={(e) => updateAnimations(e.target.checked)} className="w-4 h-4" />
-                </label>
-                <label className="flex items-center justify-between gap-4 p-3 rounded-lg border border-[#2a2a4e] bg-[#1a1a2e] hover:border-[#6366f1] cursor-pointer transition-colors">
-                  <span className="text-sm">Reduce motion</span>
-                  <input type="checkbox" checked={reduceMotion} onChange={(e) => updateReduceMotion(e.target.checked)} className="w-4 h-4" />
-                </label>
-                <div className="p-3 rounded-lg border border-[#2a2a4e] bg-[#1a1a2e]">
-                  <div className="flex items-center justify-between mb-3">
-                    <span className="text-sm">Animation speed</span>
-                    <span className="text-xs text-[#6366f1] font-semibold">{animationSpeed.toFixed(1)}×</span>
-                  </div>
-                  <input
-                    type="range"
-                    min="0.5"
-                    max="2"
-                    step="0.1"
-                    value={animationSpeed}
-                    onChange={(e) => updateAnimationSpeed(Number(e.target.value))}
-                    className="w-full accent-[#6366f1]"
-                  />
-                  <div className="mt-2 flex justify-between text-xs text-[#7070a0]">
-                    <span>0.5×</span>
-                    <span>1×</span>
-                    <span>2×</span>
-                  </div>
+            <div className="p-4 space-y-3">
+              <label className="flex items-center justify-between text-xs text-[#c5d4e6]">
+                <span>Enable animations</span>
+                <input type="checkbox" checked={animations} onChange={(e) => updateAnimations(e.target.checked)} className="w-4 h-4" />
+              </label>
+              <label className="flex items-center justify-between text-xs text-[#c5d4e6]">
+                <span>Reduce motion</span>
+                <input type="checkbox" checked={reduceMotion} onChange={(e) => updateReduceMotion(e.target.checked)} className="w-4 h-4" />
+              </label>
+              <div className="text-xs text-[#c5d4e6]">
+                <div className="flex items-center justify-between mb-2">
+                  <span>Animation speed</span>
+                  <span className="text-[#8795b8]">{animationSpeed.toFixed(1)}×</span>
                 </div>
-              </div>
-
-              {/* Divider */}
-              <div className="h-px bg-gradient-to-r from-[#2a2a4e] via-[#6366f1]/30 to-[#2a2a4e]" />
-
-              {/* About */}
-              <div className="space-y-3">
-                <h3 className="text-sm font-semibold text-[#e0e0ff]">About</h3>
-                <div className="p-3 rounded-lg border border-[#2a2a4e] bg-[#1a1a2e]">
-                  <p className="text-xs text-[#9090c0] leading-relaxed">
-                    <strong>InfinityCoder 2.0</strong> is a local AI-powered IDE that keeps all your code and memory on your machine. No cloud, no external APIs.
-                  </p>
-                </div>
+                <input
+                  type="range"
+                  min="0.5"
+                  max="2"
+                  step="0.1"
+                  value={animationSpeed}
+                  onChange={(e) => updateAnimationSpeed(Number(e.target.value))}
+                  className="w-full accent-[#5e7ce2]"
+                />
               </div>
             </div>
 
-            <div className="px-6 py-3 border-t border-[#2a2a4e] flex justify-end gap-2 bg-[#1a1a2e]">
+            <div className="px-6 py-3 border-t border-white/5 flex justify-end">
               <button
                 type="button"
-                onClick={() => setSettingsOpen(false)}
-                className="px-4 py-2 rounded-lg bg-gradient-to-r from-[#6366f1] to-[#a855f7] hover:from-[#7c3aed] hover:to-[#d946ef] text-white text-sm font-medium transition-all duration-200"
+                onClick={() => setShowSettings(false)}
+                className="px-4 py-1.5 text-xs font-medium rounded-lg bg-[#5e7ce2] hover:bg-[#6f8df2] text-white transition-colors"
               >
-                Close
+                Done
               </button>
             </div>
           </div>
