@@ -206,7 +206,7 @@ export default function App() {
           </div>
           <div className="px-5 py-3 border-t border-[#30363d] flex justify-end"><button onClick={() => setSettingsOpen(false)} className="px-4 h-8 rounded-lg bg-[#238636] hover:bg-[#2ea043] text-xs font-medium">Готово</button></div>
         </section>
-      </div>
+      </div>}
     </main>
   );
 }
