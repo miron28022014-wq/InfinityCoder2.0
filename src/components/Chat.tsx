@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invokeTauri as invoke } from "../lib/tauri";
 import { useAI } from "../hooks/useAI";
 import { SYSTEM_PROMPT } from "../lib/systemPrompt";
 import { AnimatedIcon } from "./AnimatedIcon";
