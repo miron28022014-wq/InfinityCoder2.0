@@ -23,6 +23,8 @@ struct AppState {
     workspace: Arc<Mutex<Option<PathBuf>>>,
     ai_process: Arc<Mutex<Option<Child>>>,
     ai_status: Arc<Mutex<String>>,
+    project_process: Arc<Mutex<Option<Child>>>,
+    project_status: Arc<Mutex<String>>,
     ledger_ready: Arc<Mutex<bool>>,
 }
 
@@ -412,6 +414,10 @@ fn project_command(root: &Path, action: &str) -> Result<(String, Vec<String>, Pa
     let package = root.join("package.json");
     let python = root.join("main.py");
     let pyproject = root.join("pyproject.toml");
+    let go_mod = root.join("go.mod");
+    let cmake = root.join("CMakeLists.txt");
+    let pom = root.join("pom.xml");
+    let gradlew = root.join("gradlew.bat");
 
     if cargo.is_file() {
         return Ok((
@@ -476,7 +482,12 @@ fn project_command(root: &Path, action: &str) -> Result<(String, Vec<String>, Pa
         let program = "py";
         #[cfg(not(windows))]
         let program = "python3";
-        return Ok((program.into(), vec!["main.py".into()], root.to_path_buf()));
+        let args = if action == "build" {
+            vec!["-m".into(), "compileall".into(), "-q".into(), ".".into()]
+        } else {
+            vec!["main.py".into()]
+        };
+        return Ok((program.into(), args, root.to_path_buf()));
     }
 
     if pyproject.is_file() {
@@ -484,15 +495,53 @@ fn project_command(root: &Path, action: &str) -> Result<(String, Vec<String>, Pa
         let program = "py";
         #[cfg(not(windows))]
         let program = "python3";
-        let args = if root.join("main.py").is_file() {
+        let args = if action == "build" {
+            vec!["-m".into(), "build".into()]
+        } else if root.join("main.py").is_file() {
             vec!["main.py".into()]
         } else {
-            vec!["-m".into(), "build".into()]
+            return Err("Python project has no main.py entry point.".into());
         };
         return Ok((program.into(), args, root.to_path_buf()));
     }
 
-    Err("No supported project entry point found. Expected Cargo.toml, package.json, main.py or pyproject.toml.".into())
+    if go_mod.is_file() {
+        return Ok(("go".into(), if action == "build" {
+            vec!["build".into(), "./...".into()]
+        } else {
+            vec!["run".into(), ".".into()]
+        }, root.to_path_buf()));
+    }
+
+    if cmake.is_file() {
+        if action == "build" {
+            return Ok(("cmake".into(), vec!["--build".into(), "build".into(), "--config".into(), "Release".into()], root.to_path_buf()));
+        }
+        return Err("CMake project detected; choose its executable target before running.".into());
+    }
+
+    if gradlew.is_file() {
+        #[cfg(windows)]
+        let program = "gradlew.bat";
+        #[cfg(not(windows))]
+        let program = "./gradlew";
+        return Ok((program.into(), if action == "build" { vec!["build".into()] } else { vec!["run".into()] }, root.to_path_buf()));
+    }
+
+    if pom.is_file() {
+        if action == "build" {
+            return Ok(("mvn".into(), vec!["-q".into(), "package".into(), "-DskipTests".into()], root.to_path_buf()));
+        }
+        let target = root.join("target");
+        if target.is_dir() {
+            if let Some(jar) = fs::read_dir(&target).ok().and_then(|entries| entries.flatten().map(|e| e.path()).find(|p| p.extension().and_then(|x| x.to_str()) == Some("jar") && !p.file_name().unwrap_or_default().to_string_lossy().contains("original"))) {
+                return Ok(("java".into(), vec!["-jar".into(), jar.to_string_lossy().into_owned()], root.to_path_buf()));
+            }
+        }
+        return Err("Maven project has no runnable JAR in target/. Build it first.".into());
+    }
+
+    Err("No supported project entry point found. Supported: Rust, Node, Python, Go, Gradle, Maven and CMake.".into())
 }
 
 fn cap_process_output(mut text: String) -> String {
@@ -516,7 +565,7 @@ fn build_project_inner(root: &Path) -> Result<String, String> {
     Ok(cap_process_output(text))
 }
 
-fn run_project_inner(root: &Path) -> Result<String, String> {
+fn run_project_inner(root: &Path, state: &AppState) -> Result<String, String> {
     let (program, args, cwd) = project_command(root, "run")?;
     let mut command = Command::new(&program);
     command
@@ -539,35 +588,78 @@ fn run_project_inner(root: &Path) -> Result<String, String> {
             )
         })?;
 
+    let pid = child.id();
+    let mut slot = state.project_process.lock().map_err(|_| "Project process lock poisoned.".to_string())?;
+    if let Some(mut old) = slot.take() {
+        let _ = old.kill();
+        let _ = old.wait();
+    }
+    *slot = Some(child);
+    if let Ok(mut status) = state.project_status.lock() { *status = format!("running:{pid}"); }
     Ok(format!(
         "Started successfully.\nCommand: {} {}\nWorking directory: {}\nPID: {}",
         program,
         args.join(" "),
         cwd.display(),
-        child.id()
+        pid
     ))
 }
 
-#[tauri::command(rename_all = "snake_case", async)]
-fn build_project(workspace_root: String) -> Result<String, String> {
-    let root = Path::new(&workspace_root).canonicalize().map_err(|e| e.to_string())?;
-    build_project_inner(&root)
+#[tauri::command(rename_all = "snake_case")]
+async fn build_project(workspace_root: String) -> Result<String, String> {
+    let root = PathBuf::from(&workspace_root).canonicalize().map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || build_project_inner(&root))
+        .await
+        .map_err(|e| format!("Build task failed: {e}"))?
 }
 
-#[tauri::command(rename_all = "snake_case", async)]
-fn run_project(workspace_root: String) -> Result<String, String> {
-    let root = Path::new(&workspace_root).canonicalize().map_err(|e| e.to_string())?;
-    run_project_inner(&root)
+#[tauri::command(rename_all = "snake_case")]
+async fn run_project(workspace_root: String, state: State<'_, AppState>) -> Result<String, String> {
+    let root = PathBuf::from(&workspace_root).canonicalize().map_err(|e| e.to_string())?;
+    run_project_inner(&root, state.inner())
 }
 
-#[tauri::command(rename_all = "snake_case", async)]
-fn build_and_run_project(workspace_root: String) -> Result<String, String> {
-    let root = Path::new(&workspace_root).canonicalize().map_err(|e| e.to_string())?;
-    let build = build_project_inner(&root)?;
-    match run_project_inner(&root) {
+#[tauri::command(rename_all = "snake_case")]
+async fn build_and_run_project(workspace_root: String, state: State<'_, AppState>) -> Result<String, String> {
+    let root = PathBuf::from(&workspace_root).canonicalize().map_err(|e| e.to_string())?;
+    let build = tauri::async_runtime::spawn_blocking({
+        let root = root.clone();
+        move || build_project_inner(&root)
+    }).await.map_err(|e| format!("Build task failed: {e}"))??;
+    match run_project_inner(&root, state.inner()) {
         Ok(run) => Ok(format!("{}\n\n{}", build, run)),
         Err(run_error) => Err(format!("BUILD SUCCEEDED, BUT RUN FAILED.\n\n{}\n\n{}", build, run_error)),
     }
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn stop_project(state: State<AppState>) -> Result<String, String> {
+    let mut slot = state.project_process.lock().map_err(|_| "Project process lock poisoned.".to_string())?;
+    if let Some(mut child) = slot.take() {
+        let pid = child.id();
+        let _ = child.kill();
+        let _ = child.wait();
+        if let Ok(mut status) = state.project_status.lock() { *status = "stopped".into(); }
+        Ok(format!("Stopped project process PID {pid}."))
+    } else {
+        if let Ok(mut status) = state.project_status.lock() { *status = "stopped".into(); }
+        Ok("No project process is running.".into())
+    }
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn project_status(state: State<AppState>) -> Result<String, String> {
+    let mut process = state.project_process.lock().map_err(|_| "Project process lock poisoned.".to_string())?;
+    if let Some(child) = process.as_mut() {
+        if let Ok(Some(exit)) = child.try_wait() {
+            *process = None;
+            if let Ok(mut status) = state.project_status.lock() {
+                *status = format!("exited:{}", exit.code().unwrap_or(-1));
+                return Ok(status.clone());
+            }
+        }
+    }
+    state.project_status.lock().map(|s| s.clone()).map_err(|_| "Project status lock poisoned.".into())
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -751,6 +843,8 @@ fn main() {
         workspace: Arc::new(Mutex::new(None)),
         ai_process: Arc::new(Mutex::new(None)),
         ai_status: Arc::new(Mutex::new("starting".into())),
+        project_process: Arc::new(Mutex::new(None)),
+        project_status: Arc::new(Mutex::new("stopped".into())),
         ledger_ready: Arc::new(Mutex::new(false)),
     };
 
@@ -764,6 +858,8 @@ fn main() {
             build_project,
             run_project,
             build_and_run_project,
+            stop_project,
+            project_status,
             set_workspace_scope,
             list_dir,
             read_file,
@@ -784,6 +880,12 @@ fn main() {
         if let tauri::RunEvent::Exit = event {
             if let Ok(mut g) = h.state::<AppState>().ai_process.lock() {
                 if let Some(mut c) = g.take() {
+                    let _ = c.kill();
+                    let _ = c.wait();
+                }
+            }
+            if let Ok(mut p) = h.state::<AppState>().project_process.lock() {
+                if let Some(mut c) = p.take() {
                     let _ = c.kill();
                     let _ = c.wait();
                 }

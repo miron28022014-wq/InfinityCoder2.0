@@ -14,6 +14,7 @@ export function FileTree({ rootPath, refreshToken = 0, onSelectRoot, onSelectFil
 }) {
   const [items, setItems] = useState<Item[]>([]);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
 
   const pick = async () => {
     const p = await open({ directory: true, multiple: false });
@@ -25,38 +26,46 @@ export function FileTree({ rootPath, refreshToken = 0, onSelectRoot, onSelectFil
 
   useEffect(() => {
     if (!rootPath) return;
+    let cancelled = false;
     setLoading(true);
+    setError("");
     invoke<Item[]>("list_dir", { workspace_root: rootPath, path: rootPath })
-      .then(setItems)
-      .catch(console.error)
-      .finally(() => setLoading(false));
+      .then(value => { if (!cancelled) setItems(value); })
+      .catch(e => { if (!cancelled) setError(String(e)); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
   }, [rootPath, refreshToken]);
 
   if (!rootPath) {
     return (
-      <div className="h-full p-4 bg-[#0d1117]">
-        <div className="text-[10px] uppercase tracking-widest text-[#8b949e] mb-3">Explorer</div>
-        <button onClick={onOpenProject ?? pick} className="w-full h-9 rounded-md border border-[#30363d] bg-[#161b22] hover:bg-[#21262d] hover:border-[#58a6ff]/60 transition text-sm font-medium flex items-center justify-center gap-2">
-          <span className="text-[#58a6ff]">＋</span> Open Project
+      <div className="explorer-empty">
+        <div className="explorer-title"><span>EXPLORER</span><AnimatedIcon name="document" size={14} /></div>
+        <button className="explorer-open" onClick={onOpenProject ?? pick}>
+          <AnimatedIcon name="computer" size={17} /><span>Открыть проект</span><AnimatedIcon name="right-arrow" size={14} />
         </button>
-        <div className="mt-5 p-3 rounded-lg border border-dashed border-[#30363d] text-xs leading-5 text-[#8b949e]">
-          Your workspace stays on this PC. The local AI can work with its files and Ledger after a project is opened.
+        <div className="explorer-note">
+          <AnimatedIcon name="verified" size={15} />
+          <span>Файлы проекта остаются на этом компьютере. AI получает доступ только после выбора рабочего пространства.</span>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="h-full flex flex-col bg-[#0d1117]">
-      <div className="h-11 shrink-0 px-3 border-b border-white/[0.06] flex items-center justify-between explorer-head">
-        <span className="section-kicker">Explorer</span>
-        <button onClick={onOpenProject ?? pick} title="Open another project" className="w-6 h-6 rounded hover:bg-[#21262d] text-[#8b949e] hover:text-[#e6edf3]">+</button>
+    <div className="explorer-shell">
+      <div className="explorer-head">
+        <span className="section-kicker">EXPLORER</span>
+        <button onClick={onOpenProject ?? pick} title="Открыть другой проект" aria-label="Открыть другой проект" className="explorer-icon-btn"><AnimatedIcon name="computer" size={15} /></button>
       </div>
-      <div className="px-3 py-2 text-xs font-medium text-[#e6edf3] truncate flex items-center gap-2" title={rootPath}><AnimatedIcon name="computer" size={15} /> {rootPath.split(/[\\/]/).pop()}</div>
-      <div className="flex-1 overflow-auto px-1">
-        {loading ? <div className="px-3 py-4 text-xs text-[#8b949e]">Loading workspace…</div> :
-          items.length ? items.map(x => <Node key={x.path} item={x} root={rootPath} depth={0} select={onSelectFile} />) :
-          <div className="px-3 py-4 text-xs text-[#8b949e]">Workspace is empty.</div>}
+      <div className="explorer-project">
+        <span className="project-pulse" />
+        <span title={rootPath}>{rootPath.split(/[\\/]/).pop()}</span>
+      </div>
+      <div className="explorer-tree">
+        {loading && <div className="explorer-state"><AnimatedIcon name="hourglass" size={16} mode="loop" active /> Сканирование…</div>}
+        {error && <div className="explorer-error"><AnimatedIcon name="verified" size={15} />{error}</div>}
+        {!loading && !error && !items.length && <div className="explorer-state">Папка пуста</div>}
+        {!loading && items.map(x => <Node key={x.path} item={x} root={rootPath} depth={0} select={onSelectFile} />)}
       </div>
     </div>
   );
@@ -67,19 +76,33 @@ function Node({ item, root, depth, select }: {
 }) {
   const [expanded, setExpanded] = useState(false);
   const [children, setChildren] = useState<Item[]>([]);
+  const [loading, setLoading] = useState(false);
+
   const click = async () => {
     if (item.is_dir) {
-      if (!children.length) setChildren(await invoke<Item[]>("list_dir", { workspace_root: root, path: item.path }));
-      setExpanded(v => !v);
+      setLoading(true);
+      try {
+        if (!children.length) setChildren(await invoke<Item[]>("list_dir", { workspace_root: root, path: item.path }));
+        setExpanded(v => !v);
+      } finally {
+        setLoading(false);
+      }
     } else {
-      select(item.path, await invoke<string>("read_file", { workspace_root: root, path: item.path }));
+      const value = await invoke<string>("read_file", { workspace_root: root, path: item.path });
+      select(item.path, value);
     }
   };
+
   return (
     <>
-      <button onClick={click} className="tree-row w-full text-left py-1 px-2 rounded hover:bg-[#161b22] text-xs text-[#c9d1d9] flex items-center gap-1.5" style={{ paddingLeft: 8 + depth * 14 }}>
-        <span className="w-3 text-[#8b949e]">{item.is_dir ? (expanded ? "▾" : "▸") : "·"}</span>
-        <span className="truncate flex items-center gap-1.5"><AnimatedIcon name={item.is_dir ? "computer" : "document"} size={15} />{item.name}</span>
+      <button onClick={() => void click()} className="tree-row" style={{ paddingLeft: 8 + depth * 14 }}
+        title={item.path} aria-label={item.name}>
+        <span className={"tree-chevron " + (expanded ? "expanded" : "")}>
+          {item.is_dir && <AnimatedIcon name="right-arrow" size={11} />}
+        </span>
+        <span className="tree-kind"><AnimatedIcon name={item.is_dir ? "computer" : "document"} size={15} /></span>
+        <span className="tree-name">{item.name}</span>
+        {loading && <AnimatedIcon name="hourglass" size={12} mode="loop" active />}
       </button>
       {expanded && children.map(x => <Node key={x.path} item={x} root={root} depth={depth + 1} select={select} />)}
     </>

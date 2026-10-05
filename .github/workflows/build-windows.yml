@@ -3,7 +3,7 @@ name: Build InfinityCoder Windows
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, premium-hardening-2026-10-05]
     tags: ["v*"]
 
 permissions:
