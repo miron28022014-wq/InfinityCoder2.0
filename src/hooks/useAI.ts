@@ -346,7 +346,7 @@ export function useAI({
               ...compactHistory(history)
             ],
             tools: workspaceRoot ? TOOL_DEFINITIONS : [],
-            tool_choice: workspaceRoot ? "auto" : "none",
+            tool_choice: workspaceRoot ? (/(create|создай|сделай|напиши|измени|исправь|редакт|удали|рефактор|собери|build|run|запусти|запуск|compile|компил|file|файл|проект)/i.test(text) ? "required" : "auto") : "none",
             parallel_tool_calls: false,
             stream: true,
             n_predict: -1,
@@ -402,7 +402,7 @@ export function useAI({
                   function: { name: "", arguments: "" }
                 };
 
-                if (raw.id) existing.id += raw.id;
+                if (raw.id) existing.id = raw.id;
                 if (raw.function?.name) existing.function.name += raw.function.name;
                 if (raw.function?.arguments) existing.function.arguments += raw.function.arguments;
                 streamedToolCalls.set(index, existing);
@@ -436,6 +436,14 @@ export function useAI({
 
         if (!toolCalls.length) {
           toolCalls = extractFallbackCalls(full);
+        }
+
+        // For explicit action requests, a prose-only answer is not a successful agent turn.
+        // Give the model one deterministic nudge to execute the real tools before finishing.
+        if (!toolCalls.length && workspaceRoot && /(create|создай|сделай|напиши|измени|исправь|редакт|удали|рефактор|собери|build|run|запусти|запуск|compile|компил|file|файл|проект)/i.test(text) && turn < 4) {
+          history.push({ role: "assistant", content: full || "No tool call was emitted." });
+          history.push({ role: "user", content: "Выполни задачу сейчас через реальные инструменты рабочего пространства. Не описывай будущие действия. Начни с list_dir/read_file/search_ledger при необходимости и продолжай до проверенного результата." });
+          continue;
         }
 
         if (toolCalls.length) {
