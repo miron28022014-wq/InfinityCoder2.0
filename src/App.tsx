@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { invokeTauri as invoke } from "../lib/tauri";
+import { invokeTauri as invoke } from "./lib/tauri";
 import { message, open } from "@tauri-apps/plugin-dialog";
 import { FileTree } from "./components/FileTree";
 import { Editor } from "./components/Editor";
