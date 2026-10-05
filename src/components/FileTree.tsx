@@ -50,7 +50,7 @@ export function FileTree({ rootPath, refreshToken = 0, onSelectRoot, onSelectFil
     <div className="h-full flex flex-col bg-[#0d1117]">
       <div className="h-11 shrink-0 px-3 border-b border-white/[0.06] flex items-center justify-between explorer-head">
         <span className="section-kicker">Explorer</span>
-        <button onClick={pick} title="Open another project" className="w-6 h-6 rounded hover:bg-[#21262d] text-[#8b949e] hover:text-[#e6edf3]">+</button>
+        <button onClick={onOpenProject ?? pick} title="Open another project" className="w-6 h-6 rounded hover:bg-[#21262d] text-[#8b949e] hover:text-[#e6edf3]">+</button>
       </div>
       <div className="px-3 py-2 text-xs font-medium text-[#e6edf3] truncate flex items-center gap-2" title={rootPath}><AnimatedIcon name="computer" size={15} /> {rootPath.split(/[\\/]/).pop()}</div>
       <div className="flex-1 overflow-auto px-1">
