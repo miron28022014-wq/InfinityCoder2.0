@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { invoke } from "@tauri-apps/api/core";
+import { invokeTauri as invoke } from "../lib/tauri";
 import { AnimatedIcon } from "./AnimatedIcon";
 
 type Item = { name: string; path: string; is_dir: boolean };
