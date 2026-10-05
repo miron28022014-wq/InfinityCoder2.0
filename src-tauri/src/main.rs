@@ -411,24 +411,64 @@ fn project_command(root: &Path, action: &str) -> Result<(String, Vec<String>, Pa
     let cargo = root.join("Cargo.toml");
     let package = root.join("package.json");
     let python = root.join("main.py");
+    let pyproject = root.join("pyproject.toml");
 
     if cargo.is_file() {
-        return Ok(("cargo".into(), if action == "build" { vec!["build".into()] } else { vec!["run".into()] }, root.to_path_buf()));
+        return Ok((
+            "cargo".into(),
+            if action == "build" { vec!["build".into()] } else { vec!["run".into()] },
+            root.to_path_buf(),
+        ));
     }
 
     if package.is_file() {
         let text = fs::read_to_string(&package).map_err(|e| e.to_string())?;
-        let json: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("Invalid package.json: {e}"))?;
-        let scripts = json.get("scripts").and_then(|v| v.as_object()).ok_or("package.json has no scripts")?;
-        let name = if action == "build" { "build" } else if scripts.contains_key("start") { "start" } else { "dev" };
-        if !scripts.contains_key(name) {
-            return Err(format!("package.json has no {name} script"));
-        }
+        let json: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| format!("Invalid package.json: {e}"))?;
+        let scripts = json.get("scripts").and_then(|v| v.as_object())
+            .ok_or("package.json has no scripts object")?;
+
+        let name = if action == "build" {
+            if scripts.contains_key("build") { "build" }
+            else if scripts.contains_key("compile") { "compile" }
+            else { return Err("package.json has no build or compile script".into()); }
+        } else if scripts.contains_key("start") {
+            "start"
+        } else if scripts.contains_key("preview") {
+            "preview"
+        } else if scripts.contains_key("dev") {
+            "dev"
+        } else {
+            return Err("package.json has no start, preview or dev script".into());
+        };
+
         #[cfg(windows)]
-        let program = "npm.cmd";
+        let program = if root.join("pnpm-lock.yaml").is_file() {
+            "pnpm.cmd"
+        } else if root.join("yarn.lock").is_file() {
+            "yarn.cmd"
+        } else if root.join("bun.lockb").is_file() || root.join("bun.lock").is_file() {
+            "bun.exe"
+        } else {
+            "npm.cmd"
+        };
         #[cfg(not(windows))]
-        let program = "npm";
-        return Ok((program.into(), vec!["run".into(), name.into()], root.to_path_buf()));
+        let program = if root.join("pnpm-lock.yaml").is_file() {
+            "pnpm"
+        } else if root.join("yarn.lock").is_file() {
+            "yarn"
+        } else if root.join("bun.lockb").is_file() || root.join("bun.lock").is_file() {
+            "bun"
+        } else {
+            "npm"
+        };
+
+        let args = if program.starts_with("yarn") || program == "bun.exe" || program == "bun" {
+            vec![name.into()]
+        } else {
+            vec!["run".into(), name.into()]
+        };
+        return Ok((program.into(), args, root.to_path_buf()));
     }
 
     if python.is_file() {
@@ -439,7 +479,20 @@ fn project_command(root: &Path, action: &str) -> Result<(String, Vec<String>, Pa
         return Ok((program.into(), vec!["main.py".into()], root.to_path_buf()));
     }
 
-    Err("No supported project entry point found. Expected Cargo.toml, package.json, or main.py.".into())
+    if pyproject.is_file() {
+        #[cfg(windows)]
+        let program = "py";
+        #[cfg(not(windows))]
+        let program = "python3";
+        let args = if root.join("main.py").is_file() {
+            vec!["main.py".into()]
+        } else {
+            vec!["-m".into(), "build".into()]
+        };
+        return Ok((program.into(), args, root.to_path_buf()));
+    }
+
+    Err("No supported project entry point found. Expected Cargo.toml, package.json, main.py or pyproject.toml.".into())
 }
 
 fn cap_process_output(mut text: String) -> String {
@@ -511,8 +564,10 @@ fn run_project(workspace_root: String) -> Result<String, String> {
 fn build_and_run_project(workspace_root: String) -> Result<String, String> {
     let root = Path::new(&workspace_root).canonicalize().map_err(|e| e.to_string())?;
     let build = build_project_inner(&root)?;
-    let run = run_project_inner(&root)?;
-    Ok(format!("{}\n\n{}", build, run))
+    match run_project_inner(&root) {
+        Ok(run) => Ok(format!("{}\n\n{}", build, run)),
+        Err(run_error) => Err(format!("BUILD SUCCEEDED, BUT RUN FAILED.\n\n{}\n\n{}", build, run_error)),
+    }
 }
 
 #[tauri::command(rename_all = "snake_case")]
