@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import { invokeTauri as invoke } from "../lib/tauri";
-import { message } from "@tauri-apps/plugin-dialog";
+import { message, open } from "@tauri-apps/plugin-dialog";
 import { FileTree } from "./components/FileTree";
 import { Editor } from "./components/Editor";
 import { Chat } from "./components/Chat";
 import { ActivityBar } from "./components/ActivityBar";
 import { AnimatedIcon } from "./components/AnimatedIcon";
+import { WorkspaceWelcome } from "./components/WorkspaceWelcome";
 
 export default function App() {
   const [root, setRoot] = useState("");
@@ -24,6 +25,19 @@ export default function App() {
   const [reduceMotion, setReduceMotion] = useState(() => window.localStorage.getItem("infinitycoder.reduce-motion") === "on");
   const [animationSpeed, setAnimationSpeed] = useState(() => Number(localStorage.getItem("infinitycoder.animation-speed") || "1"));
   const fileName = file?.split(/[\\/]/).pop() ?? "No file selected";
+  const openProject = async () => {
+    if (busy) return;
+    const selected = await open({ directory: true, multiple: false });
+    if (typeof selected !== "string") return;
+    try {
+      await invoke("set_workspace_scope", { path: selected });
+      await selectRoot(selected);
+      setNotice("Проект открыт");
+      window.setTimeout(() => setNotice(""), 1800);
+    } catch (error) {
+      await message(String(error), { title: "InfinityCoder — не удалось открыть проект", kind: "error" });
+    }
+  };
 
   const updateAnimations = (enabled: boolean) => {
     setAnimations(enabled);
@@ -183,13 +197,13 @@ export default function App() {
 
       <div className="flex-1 min-h-0 flex animate-fade-in">
         <ActivityBar activeId={activeTab} onSelect={(id) => { setActiveTab(id); if (id === "settings") setSettingsOpen(true); }} />
-        <aside className="w-64 shrink-0 border-r border-[#30363d] bg-[#0d1117] overflow-hidden panel-surface"><FileTree rootPath={root} refreshToken={treeVersion} onSelectRoot={selectRoot} onSelectFile={selectFile} /></aside>
+        <aside className="w-64 shrink-0 border-r border-white/[0.06] bg-[#0a0e13] overflow-hidden panel-surface"><FileTree rootPath={root} refreshToken={treeVersion} onSelectRoot={selectRoot} onSelectFile={selectFile} onOpenProject={openProject} /></aside>
         <section className="flex-1 min-w-0 bg-[#0d1117] flex flex-col">
           {file && <div className="h-9 shrink-0 border-b border-[#30363d] bg-[#161b22] flex items-center justify-between">
             <div className="h-full px-4 flex items-center gap-2 bg-[#0d1117] text-xs"><span className="text-[#58a6ff]">●</span>{fileName}{dirty && <span className="text-[#d29922]" title="Unsaved">●</span>}</div>
             <button onClick={() => void saveCurrentFile()} disabled={!dirty || busy} className="mr-2 px-3 h-7 rounded-md border border-[#30363d] bg-[#161b22] hover:bg-[#21262d] disabled:opacity-40 text-xs">{busy ? "Busy…" : "Save  Ctrl+S"}</button>
           </div>}
-          <div className="flex-1 min-h-0"><Editor filePath={file} content={content} dirty={dirty} saving={busy} onChange={v => { setContent(v); setDirty(true); }} onSave={saveCurrentFile} /></div>
+          <div className="flex-1 min-h-0">{!root ? <WorkspaceWelcome projectName={undefined} onOpenProject={openProject} onCreateFile={createNewFile} onFocusChat={() => setActiveTab("chat")} /> : <Editor filePath={file} content={content} dirty={dirty} saving={busy} onChange={v => { setContent(v); setDirty(true); }} onSave={saveCurrentFile} />}</div>
           {output && <div className="h-36 shrink-0 border-t border-[#30363d] bg-[#080b0f] overflow-auto">
             <div className="sticky top-0 px-3 py-1 border-b border-[#21262d] bg-[#161b22] text-[10px] text-[#8b949e] uppercase tracking-wider">Compiler / Runner output</div>
             <pre className="p-3 text-[11px] leading-5 text-[#c9d1d9] whitespace-pre-wrap">{output}</pre>
