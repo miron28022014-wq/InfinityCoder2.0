@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invokeTauri as invoke } from "../lib/tauri";
 
 export type Msg = {
   role: "user" | "assistant" | "system" | "tool";
