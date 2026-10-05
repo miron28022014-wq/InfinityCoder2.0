@@ -649,6 +649,16 @@ fn stop_project(state: State<AppState>) -> Result<String, String> {
 
 #[tauri::command(rename_all = "snake_case")]
 fn project_status(state: State<AppState>) -> Result<String, String> {
+    let mut process = state.project_process.lock().map_err(|_| "Project process lock poisoned.".to_string())?;
+    if let Some(child) = process.as_mut() {
+        if let Ok(Some(exit)) = child.try_wait() {
+            *process = None;
+            if let Ok(mut status) = state.project_status.lock() {
+                *status = format!("exited:{}", exit.code().unwrap_or(-1));
+                return Ok(status.clone());
+            }
+        }
+    }
     state.project_status.lock().map(|s| s.clone()).map_err(|_| "Project status lock poisoned.".into())
 }
 
