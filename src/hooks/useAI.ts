@@ -187,6 +187,18 @@ async function runTool(tool: string, args: Record<string, unknown>): Promise<str
   }
 }
 
+function normalizeToolArgs(args: Record<string, unknown>, workspaceRoot: string): Record<string, unknown> {
+  const map: Record<string, string> = {
+    workspaceRoot: "workspace_root",
+    filePath: "file_path",
+    toolCallId: "tool_call_id"
+  };
+  const normalized: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(args)) normalized[map[key] ?? key] = value;
+  if (!normalized.workspace_root && workspaceRoot) normalized.workspace_root = workspaceRoot;
+  return normalized;
+}
+
 function normalizeToolCall(raw: any): ToolCall | null {
   const fn = raw?.function ?? raw;
   const name = String(fn?.name ?? raw?.tool ?? "").trim();
@@ -442,7 +454,7 @@ export function useAI({
               parsedArgs = {};
             }
 
-            if (!parsedArgs.workspace_root && workspaceRoot) parsedArgs.workspace_root = workspaceRoot;
+            parsedArgs = normalizeToolArgs(parsedArgs, workspaceRoot);
 
             const result = await runTool(call.function.name, parsedArgs);
             history.push({
