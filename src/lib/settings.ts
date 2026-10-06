@@ -12,7 +12,22 @@ export interface Settings {
   infiniteMode: boolean;       // бесконечный режим (агент сам продлевает сессию)
   parallelSwarm: boolean;      // параллельная работа воркеров
   swarmSize: SwarmSize;        // сколько агентов в swarm
+  /** AI provider: local llama-server or RelayModels cloud API. */
+  provider: "local" | "cloud";
+  /** RelayModels API key (Bearer token). */
+  apiKey: string;
+  /** OpenAI-compatible base URL of the provider. */
+  baseUrl: string;
+  /** Model id for the cloud provider. */
+  model: string;
 }
+
+export const RELAY_BASE_URL = "https://api.relaymodels.com";
+export const LOCAL_BASE_URL = "http://127.0.0.1:8080";
+/** Default key shipped with the app — can be replaced in Settings anytime. */
+export const DEFAULT_API_KEY = "sk-QmXffMeEHBCMnD6w0GjX1HAvm1W9f1wzRg6DUoNTLtANh7MV";
+
+export const CLOUD_MODELS = ["gpt-6-astra", "claude-opus-5-5"];
 
 export const DEFAULT_SETTINGS: Settings = {
   mode: "agent",
@@ -21,7 +36,11 @@ export const DEFAULT_SETTINGS: Settings = {
   planEnabled: false,
   infiniteMode: false,
   parallelSwarm: true,
-  swarmSize: 3
+  swarmSize: 3,
+  provider: "cloud",
+  apiKey: DEFAULT_API_KEY,
+  baseUrl: RELAY_BASE_URL,
+  model: "gpt-6-astra"
 };
 
 const KEY = "infinitycoder.settings.v1";

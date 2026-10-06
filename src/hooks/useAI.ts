@@ -4,10 +4,11 @@ import { Msg } from "../types";
 import { AgentEngine, PendingQuestion, answerQuestion } from "../lib/engine";
 import { subscribeActivity, ActivityEvent, publish } from "../lib/activity";
 import { Settings, loadSettings, saveSettings } from "../lib/settings";
+import { isTauri, browserReadFile } from "../lib/browserBackend";
 
 export type { Msg };
 
-export function useAI(engineBaseUrl: string) {
+export function useAI() {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [streamingText, setStreamingText] = useState("");
   const [isGenerating, setIsGenerating] = useState(false);
@@ -37,15 +38,14 @@ export function useAI(engineBaseUrl: string) {
         const current = openFileRef.current.path;
         if (current && current.replace(/\\/g, "/") === full.replace(/\\/g, "/")) {
           try {
-            const content = await invoke<string>("read_file", {
-              workspace_root: root, path: full, agent: "editor"
-            });
+            const content = isTauri
+              ? await invoke<string>("read_file", { workspace_root: root, path: full, agent: "editor" })
+              : browserReadFile(full);
             setOpenFile({ path: full, content });
           } catch { /* ignore */ }
         }
       }
-    },
-    engineBaseUrl
+    }
   ));
 
   useEffect(() => {

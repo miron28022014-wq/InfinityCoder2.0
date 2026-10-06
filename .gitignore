@@ -1,11 +1,5 @@
 # Dependencies
 node_modules/
 
-# Build artifacts and outputs
+# Build outputs
 dist/
-build/
-src-tauri/target/
-
-# Logs and temporary files
-*.log
-*.tmp

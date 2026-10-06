@@ -6,8 +6,11 @@
 //   Ask policies and Effort levels, plus an infinite continuation mode.
 import { invoke } from "@tauri-apps/api/core";
 import { Msg, execTool, extractCalls, stripCalls, streamCompletion, TOOL_NAMES } from "./tools";
+import { isTauri, browserListDir, browserReadFile, browserWriteFile } from "./browserBackend";
+import { browserLedgerSearch, browserLedgerUpdate } from "./browserLedger";
 import { publish, complete } from "./activity";
 import { Settings, EFFORT_PRESETS } from "./settings";
+import { providerBase } from "./provider";
 import { SYSTEM_PROMPT } from "./systemPrompt";
 
 const MAX_CONTEXT_MESSAGES = 14;
@@ -31,7 +34,9 @@ function sleep(ms: number) {
   return new Promise(r => setTimeout(r, ms));
 }
 
-async function waitForAI(): Promise<void> {
+/** Local llama-server readiness check. Cloud provider is ready by definition. */
+async function waitForLocalAI(): Promise<void> {
+  if (!isTauri) throw new Error("Локальный llama-server доступен только в десктоп-режиме (Tauri). Используйте облако RelayModels.");
   for (let i = 0; i < 180; i++) {
     const status = await invoke<string>("ai_status").catch(() => "error:backend unavailable");
     if (status === "ready") return;
@@ -54,11 +59,24 @@ function identifiers(text: string): string[] {
 
 async function recall(workspaceRoot: string, agentId: string, query: string): Promise<any[]> {
   if (!workspaceRoot || !query.trim()) return [];
+  if (!isTauri) return browserLedgerSearch(query);
   return invoke<any[]>("search_ledger", {
     workspace_root: workspaceRoot,
     query: query.slice(0, 800),
     agent: agentId
   }).catch(() => []);
+}
+
+/** Persist a ledger entry on either backend. */
+function remember(workspaceRoot: string, key: string, description: string, filePath: string, agent: string) {
+  if (!isTauri) { browserLedgerUpdate(key, description, filePath); return; }
+  invoke("update_ledger", {
+    workspace_root: workspaceRoot,
+    key,
+    description,
+    file_path: filePath,
+    agent
+  }).catch(() => {});
 }
 
 /** Ask-user gate honoring the Ask policy. */
@@ -106,6 +124,25 @@ export class AgentEngine {
     private cb: EngineCallbacks,
     public engineBaseUrl = "http://127.0.0.1:8080"
   ) {}
+
+  /** Base URL of the active provider (cloud RelayModels or local llama-server). */
+  private get baseUrl(): string {
+    return providerBase(this.getSettings());
+  }
+
+  /** Build stream options from current settings + effort temperature. */
+  private streamOpts(temperature: number, extra: Record<string, any> = {}) {
+    const s = this.getSettings();
+    return {
+      engineBaseUrl: this.baseUrl,
+      apiKey: s.provider === "cloud" ? s.apiKey : "",
+      model: s.provider === "cloud" ? s.model : undefined,
+      maxTokens: s.provider === "cloud" ? 8192 : undefined,
+      temperature,
+      signal: this.abort.signal,
+      ...extra
+    };
+  }
 
   cancel() {
     this.abort.abort();
@@ -160,12 +197,7 @@ export class AgentEngine {
       try {
         full = await streamCompletion(
           [{ role: "system", content: baseSystem }, ...compact],
-          {
-            engineBaseUrl: this.engineBaseUrl,
-            temperature: preset.temperature,
-            signal: this.abort.signal,
-            onDelta: opts.onDelta
-          }
+          this.streamOpts(preset.temperature, { onDelta: opts.onDelta })
         );
       } finally {
         complete(ev.id, true);
@@ -267,7 +299,7 @@ export class AgentEngine {
           content: `TASK:\n${task}\n\nLEDGER CONTEXT:\n${JSON.stringify(ctx.slice(0, MAX_RECALL_ENTRIES)).slice(0, 4000)}\n\nWorkspace: ${workspaceRoot}`
         }
       ],
-      { engineBaseUrl: this.engineBaseUrl, temperature: 0.2, signal: this.abort.signal }
+      this.streamOpts(0.2)
     ).catch(() => "");
     complete(ev.id, !!raw);
     return raw.trim() || null;
@@ -287,7 +319,7 @@ export class AgentEngine {
         },
         { role: "user", content: `TASK:\n${task}\n\nWorkspace: ${this.getWorkspace()}` }
       ],
-      { engineBaseUrl: this.engineBaseUrl, temperature: 0.2, signal: this.abort.signal }
+      this.streamOpts(0.2)
     ).catch(() => "");
     complete(ev.id, !!raw);
     const match = raw.match(/\[[\s\S]*\]/);
@@ -321,7 +353,7 @@ export class AgentEngine {
     const workspaceRoot = this.getWorkspace();
     if (!workspaceRoot) throw new Error("Open a project first.");
 
-    await waitForAI();
+    if (settings.provider === "local") await waitForLocalAI();
 
     let plan: string | null = null;
     if (settings.planEnabled || settings.mode === "swarm") {
@@ -336,7 +368,7 @@ export class AgentEngine {
 
       const runWorker = async (sub: string, idx: number): Promise<{ task: string; out: string }> => {
         const agentId = `swarm-${idx}`;
-        const ev = publish("swarm_worker", `ИИ (worker ${idx + 1}) выполняет: ${sub.slice(0, 160)}`, sub.slice(0, 120));
+        const ev = publish("swarm_worker", `ИИ (worker ${idx + 1}) выполняет: ${sub.slice(0, 160)}`, `#${idx + 1}`);
         const h: Msg[] = [
           {
             role: "user",
@@ -377,7 +409,7 @@ export class AgentEngine {
           { role: "system", content: "You are the lead of a swarm. Summarize what the workers changed, verify consistency, list remaining problems. Plain text, no tool calls." },
           { role: "user", content: `TASK:\n${task}\n\n${plan ? "PLAN:\n" + plan + "\n\n" : ""}WORKER REPORTS:\n${synthCtx}` }
         ],
-        { engineBaseUrl: this.engineBaseUrl, temperature: preset.temperature, signal: this.abort.signal, onDelta }
+        this.streamOpts(preset.temperature, { onDelta })
       ).catch(() => results.map(r => r.out).join("\n\n---\n\n"));
       complete(ev.id, true);
     } else {
@@ -414,22 +446,38 @@ export class AgentEngine {
       finalText = finalText.replace(/\[DONE\]/gi, "").trim();
     }
 
-    // Verification pass according to effort.
-    if (preset.verifyPasses > 0 && finalText) {
+    // Verification pass according to effort: ask the model to self-check the result.
+    if (preset.verifyPasses > 0 && finalText && settings.provider !== "local") {
       const ev = publish("verify", "ИИ проверяет результат работы");
-      await execTool(workspaceRoot, "verifier", "search_ledger", { query: task.slice(0, 200) });
-      complete(ev.id, true);
+      let ok = true;
+      try {
+        const verdict = await streamCompletion(
+          [
+            { role: "system", content: "You verify a coding agent's report. Answer ONLY one word: PASS or FAIL." },
+            { role: "user", content: `TASK:\n${task.slice(0, 1500)}\n\nAGENT REPORT:\n${finalText.slice(0, 4000)}` }
+          ],
+          this.streamOpts(0.05)
+        );
+        ok = !/FAIL/i.test(verdict);
+      } catch { ok = true; }
+      complete(ev.id, ok);
+      if (!ok) {
+        const fixEv = publish("thinking", "ИИ устраняет замечания проверки");
+        const fix = await this.runLoop(
+          [{ role: "user", content: `Проверка выявила проблемы в предыдущем результате.\nЗАДАЧА:\n${task}\n\nРЕЗУЛЬТАТ:\n${finalText.slice(0, 4000)}\n\nИсправь проблемы реальными действиями (tools), затем кратко опиши итог.` }],
+          this.agentSystem("ROLE: verifier-fixer."),
+          { agentId: "fixer", maxTurns: Math.max(4, Math.floor(preset.maxTurns / 2)), onDelta }
+        ).catch(() => "");
+        complete(fixEv.id, true);
+        if (fix) finalText = fix;
+      }
     }
 
     // Persist a session checkpoint to the ledger (virtual context layer).
     if (finalText) {
-      invoke("update_ledger", {
-        workspace_root: workspaceRoot,
-        key: `session:${Date.now()}`,
-        description: `Checkpoint. Request: ${task.slice(0, 1600)}. Result: ${finalText.slice(0, 5000)}`,
-        file_path: ".infinitycoder/ledger.db",
-        agent: "main"
-      }).catch(() => {});
+      remember(workspaceRoot, `session:${Date.now()}`,
+        `Checkpoint. Request: ${task.slice(0, 1600)}. Result: ${finalText.slice(0, 5000)}`,
+        ".infinitycoder/ledger.db", "main");
     }
 
     return finalText;

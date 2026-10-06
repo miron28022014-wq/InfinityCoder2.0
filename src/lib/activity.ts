@@ -42,7 +42,7 @@ const CHAT_LABELS: Record<ActivityKind, string> = {
   ledger_search: "ищу в памяти проекта",
   ledger_update: "обновляю память проекта",
   swarm_plan: "составляю план swarm",
-  swarm_worker: "worker выполняет задачу",
+  swarm_worker: "воркер строит/выполняет",
   verify: "проверяю результат",
   done: "готово"
 };
@@ -57,6 +57,11 @@ export function publish(kind: ActivityKind, aiText: string, target?: string): Ac
     status: "running",
     ts: Date.now()
   };
+  remembered.set(e.id, e);
+  if (remembered.size > 200) {
+    const first = remembered.keys().next().value;
+    if (first !== undefined) remembered.delete(first);
+  }
   for (const l of listeners) {
     try { l(e); } catch { /* one bad listener must not break the engine */ }
   }

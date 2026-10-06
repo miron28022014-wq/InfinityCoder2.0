@@ -1,4 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
+import { isTauri, browserListDir, browserReadFile, browserWriteFile, browserRunCommand } from "./browserBackend";
+import { browserLedgerSearch, browserLedgerUpdate } from "./browserLedger";
 
 export type ToolName =
   | "read_file"
@@ -25,7 +27,9 @@ export interface CommandResult {
 }
 
 /**
- * Execute one model tool call against the real Tauri backend.
+ * Execute one model tool call against the real backend.
+ * Tauri shell  -> Rust commands (real FS + terminal + SQLite ledger).
+ * Plain browser -> localStorage FS + local bridge proxy for the terminal.
  * `agentId` scopes the Gatekeeper history per agent (required for Swarm).
  */
 export async function execTool(
@@ -35,6 +39,29 @@ export async function execTool(
   args: Record<string, any>
 ): Promise<string> {
   try {
+    if (!isTauri) {
+      switch (tool) {
+        case "read_file": return browserReadFile(String(args.path ?? ""));
+        case "write_file": {
+          browserWriteFile(String(args.path ?? ""), String(args.content ?? ""));
+          return JSON.stringify({ ok: true, path: args.path });
+        }
+        case "list_dir": return JSON.stringify(browserListDir(String(args.path ?? "/workspace")));
+        case "search_ledger": return JSON.stringify(browserLedgerSearch(String(args.query ?? "")));
+        case "update_ledger": {
+          browserLedgerUpdate(String(args.key ?? ""), String(args.description ?? ""), String(args.file_path ?? ""));
+          return JSON.stringify({ ok: true });
+        }
+        case "run_command": {
+          const res = await browserRunCommand(
+            String(args.command ?? ""),
+            typeof args.timeout_seconds === "number" ? args.timeout_seconds : undefined
+          );
+          return JSON.stringify(res);
+        }
+        default: return JSON.stringify({ error: "Unknown tool: " + tool });
+      }
+    }
     switch (tool) {
       case "read_file":
         return await invoke<string>("read_file", {
@@ -121,37 +148,55 @@ export type { Msg };
 
 export interface StreamOptions {
   engineBaseUrl: string;
+  /** Bearer token for remote providers (RelayModels). Empty = local llama-server. */
+  apiKey?: string;
   model?: string;
   temperature: number;
+  maxTokens?: number;
   signal?: AbortSignal;
   onDelta?: (chunk: string) => void;
 }
 
-/** Stream one chat completion from llama-server (OpenAI-compatible SSE). */
+/**
+ * Stream one chat completion (OpenAI-compatible SSE) — works with both the
+ * local llama-server and the RelayModels cloud API (Authorization header).
+ */
 export async function streamCompletion(
   messages: Msg[],
   opts: StreamOptions
 ): Promise<string> {
+  const remote = !!opts.apiKey;
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (remote) headers["authorization"] = `Bearer ${opts.apiKey}`;
+
+  const body: Record<string, any> = {
+    model: opts.model ?? (remote ? "gpt-6-astra" : "qwen-coder"),
+    messages,
+    stream: true,
+    temperature: opts.temperature
+  };
+  // llama-server specific params must not be sent to strict cloud APIs.
+  if (!remote) {
+    body.n_predict = -1;
+    body.cache_prompt = true;
+  } else if (opts.maxTokens) {
+    body.max_tokens = opts.maxTokens;
+  }
+
   const response = await fetch(opts.engineBaseUrl + "/v1/chat/completions", {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers,
     signal: opts.signal,
-    body: JSON.stringify({
-      model: opts.model ?? "qwen-coder",
-      messages,
-      stream: true,
-      n_predict: -1,
-      cache_prompt: true,
-      temperature: opts.temperature
-    })
+    body: JSON.stringify(body)
   });
-  if (!response.ok) throw new Error(await response.text());
+  if (!response.ok) throw new Error(`${response.status}: ${(await response.text()).slice(0, 400)}`);
   const reader = response.body?.getReader();
   if (!reader) throw new Error("AI server returned no response stream.");
 
   const decoder = new TextDecoder();
   let pending = "";
   let full = "";
+  let sawSseData = false;
 
   while (true) {
     const { value, done } = await reader.read();
@@ -159,8 +204,10 @@ export async function streamCompletion(
     pending += decoder.decode(value, { stream: true });
     const lines = pending.split("\n");
     pending = lines.pop() ?? "";
-    for (const line of lines) {
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
       if (!line.startsWith("data:")) continue;
+      sawSseData = true;
       const data = line.slice(5).trim();
       if (!data || data === "[DONE]") continue;
       try {
@@ -172,6 +219,14 @@ export async function streamCompletion(
         }
       } catch { /* ignore SSE keep-alives */ }
     }
+  }
+  // Some gateways answer with a plain JSON body even when stream=true was requested.
+  if (!sawSseData && full === "") {
+    try {
+      const j = JSON.parse(pending || "{}");
+      full = j.choices?.[0]?.message?.content ?? j.choices?.[0]?.delta?.content ?? "";
+      if (full) opts.onDelta?.(full);
+    } catch { /* nothing usable */ }
   }
   return full;
 }
