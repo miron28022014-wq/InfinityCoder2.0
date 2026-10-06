@@ -741,6 +741,7 @@ fn switch_model(model: String, state: State<AppState>) -> Result<String, String>
     let app_data = state.app_data_dir.lock().map_err(|_| "App data lock poisoned".to_string())?
         .clone().ok_or_else(|| "Application data directory is not initialized.".to_string())?;
     start_ai(&resource, &app_data, state.inner())?;
+    start_ai_background(resource, app_data, state.inner().clone());
     Ok(format!("Switched to {}", model))
 }
 
