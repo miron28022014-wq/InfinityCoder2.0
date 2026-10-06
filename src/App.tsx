@@ -21,7 +21,7 @@ export default function App() {
   const [autoRun, setAutoRun] = useState(true);
   const [treeVersion, setTreeVersion] = useState(0);
   const [notice, setNotice] = useState("");
-  const [activeTab, setActiveTab] = useState<View>("home");
+  const [activeTab, setActiveTab] = useState<View>("chat");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [projectStatus, setProjectStatus] = useState("stopped");
