@@ -338,7 +338,8 @@ fn start_ai(resource_dir: &Path, app_data_dir: &Path, state: &AppState) -> Resul
     let model_dir = app_data_dir.join("models");
     fs::create_dir_all(&model_dir).map_err(|e| format!("Failed to create model directory: {e}"))?;
     let model_name = state.selected_model.lock().map_err(|_| "Model lock poisoned".to_string())?.clone();
-    let model = model_dir.join(&model_name);
+    let model_file = if model_name.to_ascii_lowercase().ends_with(".gguf") { model_name.clone() } else { format!("{}.gguf", model_name) };
+    let model = model_dir.join(&model_file);
 
 
     if !server.is_file() {
@@ -367,7 +368,7 @@ fn start_ai(resource_dir: &Path, app_data_dir: &Path, state: &AppState) -> Resul
             "--port", &AI_PORT.to_string(),
             "--device", "Vulkan0",
             "--jinja",
-            "--alias", "qwen-coder",
+            "--alias", model_name.strip_suffix(".gguf").unwrap_or(&model_name),
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -690,13 +691,13 @@ fn list_models(state: State<AppState>) -> Result<Vec<String>, String> {
         let p = entry.path();
         if p.is_file() && p.extension().and_then(|x| x.to_str()).map(|x| x.eq_ignore_ascii_case("gguf")).unwrap_or(false) {
             if let Some(name) = p.file_name().and_then(|x| x.to_str()) {
-                models.push(name.to_string());
+                models.push(name.strip_suffix(".gguf").unwrap_or(name).to_string());
             }
         }
     }
     models.sort();
     if models.is_empty() {
-        models.push("qwen-coder.gguf".into());
+        models.push("qwen-coder".into());
     }
     Ok(models)
 }
@@ -708,12 +709,13 @@ fn selected_model(state: State<AppState>) -> Result<String, String> {
 
 #[tauri::command(rename_all = "snake_case")]
 fn switch_model(model: String, state: State<AppState>) -> Result<String, String> {
-    if model.trim().is_empty() || model.contains('/') || model.contains('\\') || !model.to_ascii_lowercase().ends_with(".gguf") {
+    if model.trim().is_empty() || model.contains('/') || model.contains('\\') {
         return Err("Invalid GGUF model name.".into());
     }
     let app_data = state.app_data_dir.lock().map_err(|_| "App data lock poisoned".to_string())?
         .clone().ok_or_else(|| "Application data directory is not initialized.".to_string())?;
-    let model_path = app_data.join("models").join(&model);
+    let model_file = if model.to_ascii_lowercase().ends_with(".gguf") { model.clone() } else { format!("{}.gguf", model) };
+    let model_path = app_data.join("models").join(&model_file);
     if !model_path.is_file() {
         return Err(format!("Model is not installed: {}", model_path.display()));
     }
@@ -901,7 +903,7 @@ fn main() {
         project_process: Arc::new(Mutex::new(None)),
         project_status: Arc::new(Mutex::new("stopped".into())),
         ledger_ready: Arc::new(Mutex::new(false)),
-        selected_model: Arc::new(Mutex::new("qwen-coder.gguf".into())),
+        selected_model: Arc::new(Mutex::new("qwen-coder".into())),
         resource_dir: Arc::new(Mutex::new(None)),
         app_data_dir: Arc::new(Mutex::new(None)),
     };
