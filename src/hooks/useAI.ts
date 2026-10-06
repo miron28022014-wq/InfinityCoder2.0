@@ -273,7 +273,7 @@ export function useAI({
               ...compactHistory(history)
             ],
             tools: workspaceRoot ? TOOL_DEFINITIONS : [],
-            tool_choice: workspaceRoot ? (ACTION_RE.test(q) ? "required" : "auto") : "none",
+            tool_choice: !workspaceRoot ? "none" : /^SUBAGENT ROLE: Planner/i.test(q) ? "none" : (ACTION_RE.test(q) ? "required" : "auto"),
             parallel_tool_calls: false,
             stream: true,
             n_predict: -1,
