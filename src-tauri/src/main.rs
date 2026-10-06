@@ -16,14 +16,42 @@ use tauri::{Manager, State};
 
 const AI_HOST: &str = "127.0.0.1";
 const AI_PORT: u16 = 8080;
-const AI_URL: &str = "http://127.0.0.1:8080";
 
 #[derive(Clone)]
 struct AppState {
     workspace: Arc<Mutex<Option<PathBuf>>>,
     ai_process: Arc<Mutex<Option<Child>>>,
     ai_status: Arc<Mutex<String>>,
-    recent_actions: Arc<Mutex<Vec<String>>>,
+    // The Gatekeeper history is per-agent, not global. A single shared list
+    // let one agent unlock writes for another (and races in Swarm mode).
+    gatekeeper: Arc<Mutex<std::collections::HashMap<String, Vec<String>>>>,
+}
+
+impl AppState {
+    fn record(&self, agent: &str, action: &str) {
+        if let Ok(mut map) = self.gatekeeper.lock() {
+            let a = map.entry(agent.to_string()).or_default();
+            a.push(action.to_string());
+            if a.len() > 16 {
+                let remove = a.len() - 16;
+                a.drain(0..remove);
+            }
+        }
+    }
+
+    fn allowed_to_write(&self, agent: &str) -> bool {
+        self.gatekeeper
+            .lock()
+            .map(|map| {
+                map.get(agent)
+                    .map(|a| {
+                        a.iter().rev().take(3)
+                            .any(|x| x == "search_ledger" || x == "update_ledger")
+                    })
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false)
+    }
 }
 
 #[derive(Serialize, Clone)]
@@ -52,26 +80,38 @@ fn scoped(root: &Path, user_path: &str) -> Result<PathBuf, String> {
     let p = Path::new(user_path);
     let full = if p.is_absolute() { p.to_path_buf() } else { root.join(p) };
     let canon_root = root.canonicalize().map_err(|e| e.to_string())?;
-    let canon = if full.exists() {
-        full.canonicalize().map_err(|e| e.to_string())?
-    } else {
-        let parent = full.parent().ok_or("Invalid path")?.canonicalize().map_err(|e| e.to_string())?;
-        parent.join(full.file_name().ok_or("Invalid filename")?)
-    };
+    // Walk up to the deepest existing ancestor and re-append the remaining
+    // components. The old version required the immediate parent to exist, so
+    // creating nested new paths (src/lib/new/deep.ts) failed.
+    let mut cursor = full.clone();
+    let mut suffix: Vec<std::path::Component<'_>> = Vec::new();
+    loop {
+        if cursor.exists() {
+            break;
+        }
+        match cursor.file_name() {
+            Some(name) => {
+                suffix.push(std::path::Component::Normal(name.to_os_string()));
+                let parent = cursor.parent().ok_or("Invalid path")?.to_path_buf();
+                if parent == cursor {
+                    return Err("Invalid path".into());
+                }
+                cursor = parent;
+            }
+            None => break,
+        }
+    }
+    let canon_base = cursor.canonicalize().map_err(|e| e.to_string())?;
+    let mut canon = canon_base;
+    for comp in suffix.into_iter().rev() {
+        if let std::path::Component::Normal(name) = comp {
+            canon.push(name);
+        }
+    }
     if !canon.starts_with(&canon_root) {
         return Err("Path escapes workspace".into());
     }
     Ok(canon)
-}
-
-fn record(state: &AppState, action: &str) {
-    if let Ok(mut a) = state.recent_actions.lock() {
-        a.push(action.to_string());
-        if a.len() > 16 {
-            let remove = a.len() - 16;
-            a.drain(0..remove);
-        }
-    }
 }
 
 fn ledger_init(root: &Path) -> Result<(), String> {
@@ -359,7 +399,7 @@ fn ai_status(state: State<AppState>) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn set_workspace_scope(path: String, state: State<AppState>) -> Result<(), String> {
+async fn set_workspace_scope(path: String, state: State<'_, AppState>) -> Result<(), String> {
     let p = PathBuf::from(path);
     if !p.is_dir() {
         return Err("Workspace is not a directory".into());
@@ -367,14 +407,19 @@ fn set_workspace_scope(path: String, state: State<AppState>) -> Result<(), Strin
     let p = p.canonicalize().map_err(|e| e.to_string())?;
     ledger_init(&p)?;
     *state.workspace.lock().map_err(|_| "Workspace lock poisoned".to_string())? = Some(p);
-    record(state.inner(), "set_workspace_scope");
     Ok(())
 }
 
 #[tauri::command]
-fn list_dir(workspace_root: String, path: String) -> Result<Vec<FileItem>, String> {
-    let root = Path::new(&workspace_root).canonicalize().map_err(|e| e.to_string())?;
-    let dir = scoped(&root, &path)?;
+async fn list_dir(workspace_root: String, path: String) -> Result<Vec<FileItem>, String> {
+    tauri::async_runtime::spawn_blocking(move || list_dir_sync(&workspace_root, &path))
+        .await
+        .map_err(|e| format!("Task failed: {e}"))?
+}
+
+fn list_dir_sync(workspace_root: &str, path: &str) -> Result<Vec<FileItem>, String> {
+    let root = Path::new(workspace_root).canonicalize().map_err(|e| e.to_string())?;
+    let dir = scoped(&root, path)?;
     let mut out = Vec::new();
     for e in fs::read_dir(dir).map_err(|e| e.to_string())? {
         let e = e.map_err(|e| e.to_string())?;
@@ -390,73 +435,233 @@ fn list_dir(workspace_root: String, path: String) -> Result<Vec<FileItem>, Strin
 }
 
 #[tauri::command]
-fn read_file(workspace_root: String, path: String, state: State<AppState>) -> Result<String, String> {
-    let root = Path::new(&workspace_root).canonicalize().map_err(|e| e.to_string())?;
-    let p = scoped(&root, &path)?;
-    let content = fs::read_to_string(&p).map_err(|e| e.to_string())?;
-    record(state.inner(), "read_file");
-    Ok(content)
+async fn read_file(
+    workspace_root: String,
+    path: String,
+    agent: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let agent = agent.unwrap_or_else(|| "main".into());
+    state.record(&agent, "read_file");
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = Path::new(&workspace_root).canonicalize().map_err(|e| e.to_string())?;
+        let p = scoped(&root, &path)?;
+        fs::read_to_string(&p).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
-#[tauri::command]
-fn write_file(workspace_root: String, path: String, content: String, state: State<AppState>) -> Result<(), String> {
-    let root = Path::new(&workspace_root).canonicalize().map_err(|e| e.to_string())?;
+/// Atomic file replacement that also works on Windows when the destination
+/// already exists (plain rename over an open/locked file fails there).
+fn replace_file(tmp: &Path, target: &Path) -> Result<(), String> {
+    #[cfg(windows)]
     {
-        let actions = state.recent_actions.lock().map_err(|_| "Action history lock poisoned".to_string())?;
-        let allowed = actions.iter().rev().take(3).any(|x| x == "search_ledger" || x == "update_ledger");
-        if !allowed {
-            return Err("ERROR: Action Denied. You must search or update the Ledger before writing files.".into());
+        use std::os::windows::ffi::OsStrExt;
+        extern "system" {
+            fn MoveFileExW(
+                existing: *const u16,
+                new: *const u16,
+                flags: u32,
+            ) -> i32;
         }
+        const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+        const MOVEFILE_COPY_ALLOWED: u32 = 0x2;
+        let w_target: Vec<u16> = target.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        let w_tmp: Vec<u16> = tmp.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        let ok = unsafe {
+            MoveFileExW(w_tmp.as_ptr(), w_target.as_ptr(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)
+        };
+        if ok == 0 {
+            // Fallback for exotic filesystems where MoveFileExW refuses.
+            fs::remove_file(target).ok();
+            fs::rename(tmp, target).map_err(|e| e.to_string())?;
+        }
+        Ok(())
     }
-
-    let p = scoped(&root, &path)?;
-    if let Some(parent) = p.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    #[cfg(not(windows))]
+    {
+        fs::rename(tmp, target).map_err(|e| e.to_string())
     }
-    let tmp = p.with_extension(format!("{}.infinitycoder.tmp", p.extension().and_then(|x| x.to_str()).unwrap_or("file")));
-    fs::write(&tmp, content.as_bytes()).map_err(|e| e.to_string())?;
-    // Windows rename does not replace an existing destination.
-    if p.exists() {
-        fs::remove_file(&p).map_err(|e| e.to_string())?;
-    }
-    fs::rename(&tmp, &p).map_err(|e| e.to_string())?;
-
-    record(state.inner(), "write_file");
-    // Ghost Writer is synchronous here: a successful write cannot leave a stale
-    // Ledger entry behind even if the application closes immediately afterwards.
-    ghost_update(&root, &path, &content)?;
-    record(state.inner(), "update_ledger");
-    Ok(())
 }
 
 #[tauri::command]
-fn search_ledger(workspace_root: String, query: String, state: State<AppState>) -> Result<Vec<Entry>, String> {
-    let root = Path::new(&workspace_root).canonicalize().map_err(|e| e.to_string())?;
-    let result = search_ledger_inner(&root, &query)?;
-    record(state.inner(), "search_ledger");
-    Ok(result)
+async fn write_file(
+    workspace_root: String,
+    path: String,
+    content: String,
+    agent: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let agent = agent.unwrap_or_else(|| "main".into());
+    if !state.allowed_to_write(&agent) {
+        return Err("ERROR: Action Denied. You must search or update the Ledger before writing files.".into());
+    }
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = Path::new(&workspace_root).canonicalize().map_err(|e| e.to_string())?;
+        let p = scoped(&root, &path)?;
+        if let Some(parent) = p.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let unique = format!("infinitycoder.{}.{}.tmp", std::process::id(), chrono_lite_nanos());
+        let tmp = p.with_file_name(format!(
+            "{}.{}",
+            p.file_name().and_then(|x| x.to_str()).unwrap_or("file"),
+            unique
+        ));
+        fs::write(&tmp, content.as_bytes()).map_err(|e| e.to_string())?;
+        replace_file(&tmp, &p)?;
+        st.record(&agent, "write_file");
+        ghost_update(&root, &path, &content)?;
+        st.record(&agent, "update_ledger");
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+}
+
+fn chrono_lite_nanos() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u128 + d.as_secs() as u128 * 1_000_000_000)
+        .unwrap_or(0)
 }
 
 #[tauri::command]
-fn update_ledger(
+async fn search_ledger(
+    workspace_root: String,
+    query: String,
+    agent: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Vec<Entry>, String> {
+    let agent = agent.unwrap_or_else(|| "main".into());
+    state.record(&agent, "search_ledger");
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = Path::new(&workspace_root).canonicalize().map_err(|e| e.to_string())?;
+        search_ledger_inner(&root, &query)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+}
+
+#[tauri::command]
+async fn update_ledger(
     workspace_root: String,
     key: String,
     description: String,
     file_path: String,
-    state: State<AppState>,
+    agent: Option<String>,
+    state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let root = Path::new(&workspace_root).canonicalize().map_err(|e| e.to_string())?;
-    ledger_init(&root)?;
-    let c = db(&root)?;
-    c.execute(
-        "INSERT INTO ledger(key,description,file_path,updated_at)
-         VALUES(?1,?2,?3,unixepoch())
-         ON CONFLICT(key) DO UPDATE SET description=excluded.description,file_path=excluded.file_path,updated_at=unixepoch()",
-        params![key, description, file_path],
-    ).map_err(|e| e.to_string())?;
-    upsert_tokens(&c, &key, &format!("{} {} {}", key, description, file_path))?;
-    record(state.inner(), "update_ledger");
-    Ok(())
+    let agent = agent.unwrap_or_else(|| "main".into());
+    state.record(&agent, "update_ledger");
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = Path::new(&workspace_root).canonicalize().map_err(|e| e.to_string())?;
+        ledger_init(&root)?;
+        let c = db(&root)?;
+        c.execute(
+            "INSERT INTO ledger(key,description,file_path,updated_at)
+             VALUES(?1,?2,?3,unixepoch())
+             ON CONFLICT(key) DO UPDATE SET description=excluded.description,file_path=excluded.file_path,updated_at=unixepoch()",
+            params![key, description, file_path],
+        ).map_err(|e| e.to_string())?;
+        upsert_tokens(&c, &key, &format!("{} {} {}", key, description, file_path))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+}
+
+#[derive(Serialize, Clone)]
+struct CommandResult {
+    stdout: String,
+    stderr: String,
+    exit_code: i32,
+    timed_out: bool,
+}
+
+fn kill_child_tree(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[tauri::command]
+async fn run_command(
+    workspace_root: String,
+    command: String,
+    timeout_seconds: Option<u64>,
+    agent: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<CommandResult, String> {
+    let agent = agent.unwrap_or_else(|| "main".into());
+    // Commands can mutate files just like write_file, so the Gatekeeper
+    // applies here too: no shell access without prior Ledger context.
+    if !state.allowed_to_write(&agent) {
+        return Err("ERROR: Action Denied. Search or update the Ledger before running terminal commands.".into());
+    }
+    state.record(&agent, "run_command");
+    let limit = timeout_seconds.unwrap_or(120).clamp(1, 600);
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = Path::new(&workspace_root).canonicalize().map_err(|e| e.to_string())?;
+        let trimmed = command.trim();
+        if trimmed.is_empty() {
+            return Err("Empty command".into());
+        }
+        let mut cmd = if cfg!(windows) {
+            let mut c = Command::new("cmd");
+            c.args(["/C", trimmed]);
+            c
+        } else {
+            let mut c = Command::new("sh");
+            c.args(["-c", trimmed]);
+            c
+        };
+        cmd.current_dir(&root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn command: {e}"))?;
+
+        // Read pipes off-thread so a chatty program cannot deadlock the wait loop.
+        let mut so = child.stdout.take().unwrap();
+        let mut se = child.stderr.take().unwrap();
+        let sh = std::thread::spawn(move || {
+            let mut a = String::new();
+            let mut b = String::new();
+            let _ = so.read_to_string(&mut a);
+            let _ = se.read_to_string(&mut b);
+            (a, b)
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(limit);
+        let mut timed_out = false;
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(st)) => break Ok(st),
+                Ok(None) => {
+                    if std::time::Instant::now() >= deadline {
+                        timed_out = true;
+                        kill_child_tree(&mut child);
+                        break child.wait().map_err(|e| e.to_string());
+                    }
+                    thread::sleep(Duration::from_millis(50));
+                }
+                Err(e) => break Err(e),
+            }
+        };
+        let (stdout, stderr) = sh.join().unwrap_or_default();
+        let exit_code = status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
+        let cap = 200_000usize;
+        Ok(CommandResult {
+            stdout: if stdout.len() > cap { stdout[..cap].to_string() } else { stdout },
+            stderr: if stderr.len() > cap { stderr[..cap].to_string() } else { stderr },
+            exit_code,
+            timed_out,
+        })
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 fn main() {
@@ -464,21 +669,21 @@ fn main() {
         workspace: Arc::new(Mutex::new(None)),
         ai_process: Arc::new(Mutex::new(None)),
         ai_status: Arc::new(Mutex::new("starting".into())),
-        recent_actions: Arc::new(Mutex::new(Vec::new())),
+        gatekeeper: Arc::new(Mutex::new(std::collections::HashMap::new())),
     };
 
     let app = tauri::Builder::default()
         .manage(state.clone())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
-        .invoke_handler(tauri::generate_handler![
+                .invoke_handler(tauri::generate_handler![
             ai_status,
             set_workspace_scope,
             list_dir,
             read_file,
             write_file,
             search_ledger,
-            update_ledger
+            update_ledger,
+            run_command
         ])
         .build(tauri::generate_context!())
         .expect("error while building InfinityCoder");
@@ -492,7 +697,21 @@ fn main() {
             if let Ok(mut g) = h.state::<AppState>().ai_process.lock() {
                 if let Some(mut c) = g.take() {
                     let _ = c.kill();
-                    let _ = c.wait();
+                    // Reap the child so llama-server never lingers as a zombie
+                    // holding the model in VRAM after the app window closes.
+                    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                    loop {
+                        match c.try_wait() {
+                            Ok(Some(_)) => break,
+                            _ => {
+                                if std::time::Instant::now() >= deadline {
+                                    let _ = c.wait();
+                                    break;
+                                }
+                                thread::sleep(Duration::from_millis(50));
+                            }
+                        }
+                    }
                 }
             }
         }
