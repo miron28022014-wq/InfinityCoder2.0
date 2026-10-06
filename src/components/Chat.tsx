@@ -11,7 +11,7 @@ const MODEL_KEY = "infinitycoder.selected-model";
 export function Chat({ workspaceRoot, openFilePath, openFileContent }: {
   workspaceRoot: string; openFilePath: string | null; openFileContent: string;
 }) {
-  const [model, setModel] = useState(() => localStorage.getItem(MODEL_KEY) || "qwen-coder");
+  const [model, setModel] = useState<string>(() => localStorage.getItem(MODEL_KEY) || "qwen-coder");
   const [models, setModels] = useState<string[]>(["qwen-coder"]);
   const [input, setInput] = useState("");
   const [live, setLive] = useState("");
@@ -48,7 +48,7 @@ export function Chat({ workspaceRoot, openFilePath, openFileContent }: {
   useEffect(() => {
     let cancelled = false;
     const loadModels = async () => {
-      const ids = await invoke<string[]>("list_models").catch(() => []);
+      const ids: string[] = await invoke<string[]>("list_models").catch(() => [] as string[]);
       if (!cancelled && ids.length) {
         setModels(ids);
         if (!ids.includes(model)) setModel(ids[0]);
