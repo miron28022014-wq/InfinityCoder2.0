@@ -386,7 +386,8 @@ export function useAI({
       };
       const next = [nextConversation, ...conversationsRef.current.filter(c => c.id !== nextConversation.id)];
       persist(next);
-      return finalMessages.filter(m => m.role === "assistant").at(-1)?.content ?? "";
+      const assistantMessages = finalMessages.filter(m => m.role === "assistant");
+      return assistantMessages.length ? assistantMessages[assistantMessages.length - 1].content : "";
     } finally {
       setStreaming(false);
     }
