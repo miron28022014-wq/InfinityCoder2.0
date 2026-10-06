@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invokeTauri as invoke } from "../lib/tauri";
 
 export type Msg = {
@@ -163,6 +163,16 @@ export function useAI({
   const [conversations, setConversations] = useState<Conversation[]>(() => loadConversations(workspaceRoot));
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(() => loadConversations(workspaceRoot)[0]?.id ?? null);
   const [streaming, setStreaming] = useState(false);
+  const conversationsRef = useRef<Conversation[]>(conversations);
+  const currentIdRef = useRef<string | null>(currentConversationId);
+
+  useEffect(() => {
+    conversationsRef.current = conversations;
+  }, [conversations]);
+
+  useEffect(() => {
+    currentIdRef.current = currentConversationId;
+  }, [currentConversationId]);
 
   useEffect(() => {
     const loaded = loadConversations(workspaceRoot);
@@ -180,10 +190,11 @@ export function useAI({
 
   const createConversation = useCallback((title = "Новый диалог") => {
     const c: Conversation = { id: makeId("chat"), title, messages: [], updatedAt: Date.now() };
-    persist([c, ...conversations]);
+    const next = [c, ...conversationsRef.current];
+    persist(next);
     setCurrentConversationId(c.id);
     return c.id;
-  }, [conversations, persist]);
+  }, [persist]);
 
   const newConversation = useCallback(() => createConversation(), [createConversation]);
 
@@ -192,7 +203,7 @@ export function useAI({
   }, []);
 
   const deleteConversation = useCallback((id: string) => {
-    const next = conversations.filter(c => c.id !== id);
+    const next = conversationsRef.current.filter(c => c.id !== id);
     if (!next.length) {
       const c: Conversation = { id: makeId("chat"), title: "Новый диалог", messages: [], updatedAt: Date.now() };
       persist([c]);
@@ -201,7 +212,7 @@ export function useAI({
     }
     persist(next);
     if (id === currentConversationId) setCurrentConversationId(next[0].id);
-  }, [conversations, currentConversationId, persist]);
+  }, [currentConversationId, persist]);
 
   const recall = useCallback(async (query: string) => {
     if (!workspaceRoot || !query.trim()) return [];
@@ -217,11 +228,13 @@ export function useAI({
       await waitForAI();
       if (workspaceRoot) await invoke("begin_agent_turn").catch(() => {});
 
-      let conversation = conversations.find(c => c.id === currentConversationId);
+      const liveConversations = conversationsRef.current;
+      const liveCurrentId = currentIdRef.current;
+      let conversation = liveConversations.find(c => c.id === liveCurrentId);
       if (!conversation) {
         const c: Conversation = { id: makeId("chat"), title: q.slice(0, 48), messages: [], updatedAt: Date.now() };
         conversation = c;
-        persist([c, ...conversations]);
+        persist([c, ...liveConversations]);
         setCurrentConversationId(c.id);
       }
 
@@ -371,13 +384,13 @@ export function useAI({
         messages: finalMessages,
         updatedAt: Date.now()
       };
-      const next = [nextConversation, ...conversations.filter(c => c.id !== nextConversation.id)];
+      const next = [nextConversation, ...conversationsRef.current.filter(c => c.id !== nextConversation.id)];
       persist(next);
       return finalMessages.filter(m => m.role === "assistant").at(-1)?.content ?? "";
     } finally {
       setStreaming(false);
     }
-  }, [conversations, currentConversationId, engineBaseUrl, model, openFileContent, openFilePath, persist, recall, streaming, systemPrompt, workspaceRoot]);
+  }, [engineBaseUrl, model, openFileContent, openFilePath, persist, recall, streaming, systemPrompt, workspaceRoot]);
 
   const runSubagents = useCallback(async (task: string, onDelta: (s: string) => void, onPhase: (name: string) => void) => {
     const phases = [
