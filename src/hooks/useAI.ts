@@ -1,216 +1,123 @@
-import { useCallback, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { Msg } from "../types";
+import { AgentEngine, PendingQuestion, answerQuestion } from "../lib/engine";
+import { subscribeActivity, ActivityEvent, publish } from "../lib/activity";
+import { Settings, loadSettings, saveSettings } from "../lib/settings";
 
-export type Msg = { role: "user" | "assistant" | "system" | "tool"; content: string };
-type ToolCall = { tool: string; args: Record<string, string> };
+export type { Msg };
 
-const TOOL_NAMES = ["read_file", "write_file", "list_dir", "search_ledger", "update_ledger"];
-const MAX_CONTEXT_MESSAGES = 10;
-const MAX_FILE_CONTEXT = 12000;
-const MAX_RECALL_ENTRIES = 8;
-
-async function runTool(tool: string, args: Record<string, string>): Promise<string> {
-  try {
-    switch (tool) {
-      case "read_file": return await invoke<string>("read_file", args);
-      case "write_file": await invoke("write_file", args); return JSON.stringify({ ok: true });
-      case "list_dir": return JSON.stringify(await invoke("list_dir", args));
-      case "search_ledger": return JSON.stringify(await invoke("search_ledger", args));
-      case "update_ledger": await invoke("update_ledger", args); return JSON.stringify({ ok: true });
-      default: return JSON.stringify({ error: "Unknown tool" });
-    }
-  } catch (e) {
-    return JSON.stringify({ error: String(e) });
-  }
-}
-
-function extractCalls(text: string): ToolCall[] {
-  const out: ToolCall[] = [];
-  const re = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text))) {
-    try {
-      const x = JSON.parse(m[1]);
-      if (x?.tool && x?.args) out.push(x);
-    } catch { /* model emitted malformed tool JSON; the next turn can recover */ }
-  }
-  return out;
-}
-
-function identifiers(text: string): string[] {
-  const stop = new Set([
-    "const", "function", "return", "class", "interface", "string", "number",
-    "boolean", "undefined", "InfinityCoder", "workspace", "project", "file",
-    "this", "that", "with", "from", "into", "true", "false"
-  ]);
-  return [...new Set(
-    (text.match(/\b[A-Za-z_$][A-Za-z0-9_$-]{2,}\b/g) ?? [])
-      .filter(x => !stop.has(x))
-  )].slice(0, 10);
-}
-
-async function waitForAI(): Promise<void> {
-  for (let i = 0; i < 180; i++) {
-    const status = await invoke<string>("ai_status").catch(() => "error:backend unavailable");
-    if (status === "ready") return;
-    if (status.startsWith("error:")) throw new Error(status.slice(6));
-    await new Promise(r => setTimeout(r, 500));
-  }
-  throw new Error("AI engine did not become ready within 90 seconds.");
-}
-
-export function useAI({
-  engineBaseUrl,
-  systemPrompt,
-  openFilePath,
-  openFileContent,
-  workspaceRoot
-}: {
-  engineBaseUrl: string;
-  systemPrompt: string;
-  openFilePath: string | null;
-  openFileContent: string;
-  workspaceRoot: string;
-}) {
+export function useAI(engineBaseUrl: string) {
   const [messages, setMessages] = useState<Msg[]>([]);
-  const [streaming, setStreaming] = useState(false);
+  const [streamingText, setStreamingText] = useState("");
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [activity, setActivity] = useState<ActivityEvent[]>([]);
+  const [question, setQuestion] = useState<PendingQuestion | null>(null);
+  const [workspaceRoot, setWorkspaceRoot] = useState("");
+  const [openFile, setOpenFile] = useState<{ path: string | null; content: string }>({ path: null, content: "" });
+  const [settings, setSettings] = useState<Settings>(() => loadSettings());
 
-  const recall = useCallback(async (query: string) => {
-    if (!workspaceRoot || !query.trim()) return [];
-    return invoke<any[]>("search_ledger", {
-      workspace_root: workspaceRoot,
-      query: query.slice(0, 800)
-    }).catch(() => []);
-  }, [workspaceRoot]);
+  // Live holders so the engine instance never needs to be re-created.
+  const settingsRef = useRef(settings);      settingsRef.current = settings;
+  const workspaceRef = useRef(workspaceRoot); workspaceRef.current = workspaceRoot;
+  const openFileRef = useRef(openFile);       openFileRef.current = openFile;
 
-  const sendMessage = useCallback(async (text: string, onDelta: (s: string) => void) => {
-    if (!workspaceRoot) throw new Error("Open a project first.");
-    setStreaming(true);
+  const [engine] = useState(() => new AgentEngine(
+    () => settingsRef.current,
+    () => workspaceRef.current,
+    () => openFileRef.current,
+    {
+      onActivity: () => {},
+      onQuestion: q => setQuestion(q),
+      onFileWritten: async (path: string) => {
+        // Reload the file in the editor when the agent edits the open file.
+        const root = workspaceRef.current;
+        if (!root) return;
+        const full = path.startsWith(root) ? path : root + "/" + path.replace(/^\/+/, "");
+        const current = openFileRef.current.path;
+        if (current && current.replace(/\\/g, "/") === full.replace(/\\/g, "/")) {
+          try {
+            const content = await invoke<string>("read_file", {
+              workspace_root: root, path: full, agent: "editor"
+            });
+            setOpenFile({ path: full, content });
+          } catch { /* ignore */ }
+        }
+      }
+    },
+    engineBaseUrl
+  ));
+
+  useEffect(() => {
+    const unsub = subscribeActivity(e => {
+      setActivity(prev => {
+        const idx = prev.findIndex(x => x.id === e.id);
+        if (idx >= 0) {
+          const copy = [...prev];
+          copy[idx] = e;
+          return copy;
+        }
+        return [...prev.slice(-40), e];
+      });
+    });
+    return unsub;
+  }, []);
+
+  const send = async (text: string) => {
+    if (!text.trim() || isGenerating) return;
+    const userMsg: Msg = { role: "user", content: text };
+    const history = messages.map(m => ({ ...m }));
+    setMessages(prev => [...prev, userMsg]);
+    setIsGenerating(true);
+    setStreamingText("");
+    setActivity([]);
+    publish("thinking", "ИИ получил задачу и начинает работу");
+
+    let acc = "";
+    const onDelta = (d: string) => { acc += d; setStreamingText(acc); };
 
     try {
-      await waitForAI();
-
-      const initialRecall = await recall(text);
-      let history: Msg[] = [...messages, { role: "user", content: text }];
-      const baseContext = [
-        openFilePath ? `OPEN FILE: ${openFilePath}\n${openFileContent.slice(0, MAX_FILE_CONTEXT)}` : "",
-        initialRecall.length
-          ? `LEDGER RECALL:\n${JSON.stringify(initialRecall.slice(0, MAX_RECALL_ENTRIES))}`
-          : ""
-      ].filter(Boolean).join("\n\n");
-
-      for (let turn = 0; turn < 32; turn++) {
-        const compactHistory = history.length > MAX_CONTEXT_MESSAGES
-          ? history.slice(-MAX_CONTEXT_MESSAGES)
-          : history;
-
-        const response = await fetch(engineBaseUrl + "/v1/chat/completions", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            model: "qwen-coder",
-            messages: [
-              {
-                role: "system",
-                content:
-                  systemPrompt +
-                  "\n\nAVAILABLE TOOLS: " + TOOL_NAMES.join(", ") +
-                  "\nUse exactly <tool_call>{\"tool\":\"name\",\"args\":{...}}</tool_call> and wait for the result." +
-                  "\nNever write a file before a Ledger search/update in the current action chain." +
-                  "\nWorkspace: " + workspaceRoot
-              },
-              ...(baseContext ? [{ role: "system" as const, content: baseContext }] : []),
-              ...compactHistory
-            ],
-            stream: true,
-            n_predict: -1,
-            cache_prompt: true,
-            temperature: 0.15
-          })
-        });
-
-        if (!response.ok) throw new Error(await response.text());
-        const reader = response.body?.getReader();
-        if (!reader) throw new Error("AI server returned no response stream.");
-
-        const decoder = new TextDecoder();
-        let pending = "";
-        let full = "";
-
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          pending += decoder.decode(value, { stream: true });
-          const lines = pending.split("\n");
-          pending = lines.pop() ?? "";
-
-          for (const line of lines) {
-            if (!line.startsWith("data:")) continue;
-            const data = line.slice(5).trim();
-            if (!data || data === "[DONE]") continue;
-            try {
-              const json = JSON.parse(data);
-              const delta = json.choices?.[0]?.delta?.content ?? "";
-              if (delta) {
-                full += delta;
-                onDelta(delta);
-              }
-            } catch { /* ignore SSE keep-alives/non-JSON lines */ }
-          }
-        }
-
-        history.push({ role: "assistant", content: full });
-        const calls = extractCalls(full);
-
-        if (calls.length) {
-          for (const call of calls) {
-            const result = await runTool(call.tool, {
-              workspace_root: workspaceRoot,
-              ...call.args
-            });
-            history.push({ role: "tool", content: call.tool + " RESULT:\n" + result });
-          }
-          continue;
-        }
-
-        // Auto-Recall is a real continuation loop: retrieve missing entities and
-        // give them to the model on the next turn instead of merely logging them.
-        const ids = identifiers(text + "\n" + full);
-        const recallHits: any[] = [];
-        for (const id of ids) {
-          const hits = await recall(id);
-          if (hits.length) recallHits.push({ query: id, entries: hits.slice(0, 3) });
-        }
-
-        if (recallHits.length && turn < 31) {
-          history.push({
-            role: "tool",
-            content: "AUTO_RECALL RESULTS:\n" + JSON.stringify(recallHits)
-          });
-          continue;
-        }
-
-        break;
-      }
-
-      // Persist a compact session checkpoint outside the model context. This is
-      // the practical "virtual context" layer: future turns retrieve it by query.
-      const final = history[history.length - 1]?.content ?? "";
-      if (final) {
-        await invoke("update_ledger", {
-          workspace_root: workspaceRoot,
-          key: `session:${Date.now()}`,
-          description: `Conversation checkpoint. User request: ${text.slice(0, 1600)}. Latest AI result: ${final.slice(0, 5000)}`,
-          file_path: ".infinitycoder/ledger.db"
-        }).catch(() => {});
-      }
-
-      setMessages(history);
-      return final;
+      const final = await engine.processTask(text, history, onDelta);
+      setMessages(prev => [...prev, { role: "assistant", content: final || acc }]);
+    } catch (e) {
+      setMessages(prev => [...prev, { role: "assistant", content: `⛔ Ошибка: ${String(e)}` }]);
     } finally {
-      setStreaming(false);
+      setStreamingText("");
+      setIsGenerating(false);
+      setQuestion(null);
     }
-  }, [engineBaseUrl, messages, openFileContent, openFilePath, recall, systemPrompt, workspaceRoot]);
+  };
 
-  return { messages, streaming, sendMessage };
+  const cancel = () => {
+    engine.cancel();
+    setIsGenerating(false);
+    setQuestion(null);
+  };
+
+  const respond = (answer: string | null) => {
+    if (question) answerQuestion(question.id, answer);
+  };
+
+  const reset = () => {
+    engine.reset();
+    setMessages([]);
+    setActivity([]);
+    setStreamingText("");
+  };
+
+  const updateSettings = (patch: Partial<Settings>) => {
+    setSettings(prev => {
+      const next = { ...prev, ...patch };
+      saveSettings(next);
+      return next;
+    });
+  };
+
+  return {
+    messages, streamingText, isGenerating, activity, question, respond,
+    send, cancel, reset,
+    workspaceRoot, setWorkspaceRoot,
+    openFile, setOpenFile,
+    settings, updateSettings
+  };
 }

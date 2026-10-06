@@ -1,1 +1,12 @@
-{"$schema":"https://schema.tauri.app/config/2","identifier":"default","description":"Default permissions","windows":["main"],"permissions":["core:default","dialog:default","fs:default"]}
+{
+"$schema": "https://schema.tauri.app/config/2",
+"identifier": "default",
+"description": "Default permissions",
+"windows": [
+"main"
+],
+"permissions": [
+"core:default",
+"dialog:default"
+]
+}
