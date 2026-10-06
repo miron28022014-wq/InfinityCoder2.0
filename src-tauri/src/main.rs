@@ -26,6 +26,9 @@ struct AppState {
     project_process: Arc<Mutex<Option<Child>>>,
     project_status: Arc<Mutex<String>>,
     ledger_ready: Arc<Mutex<bool>>,
+    selected_model: Arc<Mutex<String>>,
+    resource_dir: Arc<Mutex<Option<PathBuf>>>,
+    app_data_dir: Arc<Mutex<Option<PathBuf>>>,
 }
 
 #[derive(Serialize, Clone)]
@@ -334,7 +337,9 @@ fn start_ai(resource_dir: &Path, app_data_dir: &Path, state: &AppState) -> Resul
     let server = resource_dir.join("bin").join("llama-server-vulkan.exe");
     let model_dir = app_data_dir.join("models");
     fs::create_dir_all(&model_dir).map_err(|e| format!("Failed to create model directory: {e}"))?;
-    let model = model_dir.join("qwen-coder.gguf");
+    let model_name = state.selected_model.lock().map_err(|_| "Model lock poisoned".to_string())?.clone();
+    let model = model_dir.join(&model_name);
+
 
     if !server.is_file() {
         return Err(format!("llama-server runtime not found: {}", server.display()));
@@ -674,6 +679,70 @@ fn ai_status(state: State<AppState>) -> Result<String, String> {
 }
 
 #[tauri::command(rename_all = "snake_case")]
+fn list_models(state: State<AppState>) -> Result<Vec<String>, String> {
+    let app_data = state.app_data_dir.lock().map_err(|_| "App data lock poisoned".to_string())?
+        .clone().ok_or_else(|| "Application data directory is not initialized.".to_string())?;
+    let model_dir = app_data.join("models");
+    fs::create_dir_all(&model_dir).map_err(|e| e.to_string())?;
+    let mut models = Vec::new();
+    for entry in fs::read_dir(&model_dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let p = entry.path();
+        if p.is_file() && p.extension().and_then(|x| x.to_str()).map(|x| x.eq_ignore_ascii_case("gguf")).unwrap_or(false) {
+            if let Some(name) = p.file_name().and_then(|x| x.to_str()) {
+                models.push(name.to_string());
+            }
+        }
+    }
+    models.sort();
+    if models.is_empty() {
+        models.push("qwen-coder.gguf".into());
+    }
+    Ok(models)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn selected_model(state: State<AppState>) -> Result<String, String> {
+    Ok(state.selected_model.lock().map_err(|_| "Model lock poisoned".to_string())?.clone())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn switch_model(model: String, state: State<AppState>) -> Result<String, String> {
+    if model.trim().is_empty() || model.contains('/') || model.contains('\\') || !model.to_ascii_lowercase().ends_with(".gguf") {
+        return Err("Invalid GGUF model name.".into());
+    }
+    let app_data = state.app_data_dir.lock().map_err(|_| "App data lock poisoned".to_string())?
+        .clone().ok_or_else(|| "Application data directory is not initialized.".to_string())?;
+    let model_path = app_data.join("models").join(&model);
+    if !model_path.is_file() {
+        return Err(format!("Model is not installed: {}", model_path.display()));
+    }
+
+    {
+        let mut selected = state.selected_model.lock().map_err(|_| "Model lock poisoned".to_string())?;
+        if *selected == model && state.ai_process.lock().map_err(|_| "AI process lock poisoned".to_string())?.is_some() {
+            return Ok(format!("Model already active: {}", model));
+        }
+        *selected = model.clone();
+    }
+
+    if let Ok(mut process) = state.ai_process.lock() {
+        if let Some(mut child) = process.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+    if let Ok(mut status) = state.ai_status.lock() { *status = "switching".into(); }
+
+    let resource = state.resource_dir.lock().map_err(|_| "Resource lock poisoned".to_string())?
+        .clone().ok_or_else(|| "Resource directory is not initialized.".to_string())?;
+    let app_data = state.app_data_dir.lock().map_err(|_| "App data lock poisoned".to_string())?
+        .clone().ok_or_else(|| "Application data directory is not initialized.".to_string())?;
+    start_ai(&resource, &app_data, state.inner())?;
+    Ok(format!("Switched to {}", model))
+}
+
+#[tauri::command(rename_all = "snake_case")]
 fn set_workspace_scope(path: String, state: State<AppState>) -> Result<(), String> {
     let p = PathBuf::from(path);
     if !p.is_dir() {
@@ -734,13 +803,6 @@ fn create_file(
     state: State<AppState>,
 ) -> Result<String, String> {
     let root = Path::new(&workspace_root).canonicalize().map_err(|e| e.to_string())?;
-    {
-        let ready = state.ledger_ready.lock().map_err(|_| "Ledger state lock poisoned".to_string())?;
-        if !*ready {
-            return Err("ERROR: Action Denied. Ledger context is stale. Run search_ledger or update_ledger before create_file.".into());
-        }
-    }
-
     let p = scoped(&root, &path)?;
     if p.exists() {
         return Err(format!("File already exists: {}", p.display()));
@@ -768,13 +830,6 @@ fn create_file(
 #[tauri::command(rename_all = "snake_case")]
 fn write_file(workspace_root: String, path: String, content: String, state: State<AppState>) -> Result<String, String> {
     let root = Path::new(&workspace_root).canonicalize().map_err(|e| e.to_string())?;
-    {
-        let ready = state.ledger_ready.lock().map_err(|_| "Ledger state lock poisoned".to_string())?;
-        if !*ready {
-            return Err("ERROR: Action Denied. Ledger context is stale. Run search_ledger or update_ledger before write_file.".into());
-        }
-    }
-
     let p = scoped(&root, &path)?;
     if let Some(parent) = p.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -846,6 +901,9 @@ fn main() {
         project_process: Arc::new(Mutex::new(None)),
         project_status: Arc::new(Mutex::new("stopped".into())),
         ledger_ready: Arc::new(Mutex::new(false)),
+        selected_model: Arc::new(Mutex::new("qwen-coder.gguf".into())),
+        resource_dir: Arc::new(Mutex::new(None)),
+        app_data_dir: Arc::new(Mutex::new(None)),
     };
 
     let app = tauri::Builder::default()
@@ -867,13 +925,18 @@ fn main() {
             create_file,
             write_file,
             search_ledger,
-            update_ledger
+            update_ledger,
+            list_models,
+            selected_model,
+            switch_model
         ])
         .build(tauri::generate_context!())
         .expect("error while building InfinityCoder");
 
     let resource = app.path().resource_dir().expect("failed to resolve resource directory");
     let app_data = app.path().app_data_dir().expect("failed to resolve app data directory");
+    if let Ok(mut slot) = state.resource_dir.lock() { *slot = Some(resource.clone()); }
+    if let Ok(mut slot) = state.app_data_dir.lock() { *slot = Some(app_data.clone()); }
     start_ai_background(resource, app_data, state.clone());
 
     app.run(move |h, event| {
