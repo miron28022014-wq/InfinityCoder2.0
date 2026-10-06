@@ -247,7 +247,7 @@ export default function App() {
         </div>
       </header>
 
-      <div className="ic-body">
+      <div className={"ic-body " + (activeTab === "chat" ? "chat-mode" : "")}>
         <ActivityBar activeId={activeTab} onSelect={(id) => {
           if (id === "settings" || id === "profile") setSettingsOpen(true);
           else if (id === "home" || id === "files" || id === "chat" || id === "workspace") setActiveTab(id as View);
