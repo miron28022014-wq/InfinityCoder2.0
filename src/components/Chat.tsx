@@ -48,16 +48,11 @@ export function Chat({ workspaceRoot, openFilePath, openFileContent }: {
   useEffect(() => {
     let cancelled = false;
     const loadModels = async () => {
-      try {
-        const response = await fetch("http://127.0.0.1:8080/v1/models");
-        if (!response.ok) return;
-        const data = await response.json();
-        const ids = Array.isArray(data?.data) ? data.data.map((x: any) => String(x.id)).filter(Boolean) : [];
-        if (!cancelled && ids.length) {
-          setModels(ids);
-          if (!ids.includes(model)) setModel(ids[0]);
-        }
-      } catch {}
+      const ids = await invoke<string[]>("list_models").catch(() => []);
+      if (!cancelled && ids.length) {
+        setModels(ids);
+        if (!ids.includes(model)) setModel(ids[0]);
+      }
     };
     void loadModels();
     const id = window.setInterval(loadModels, 5000);
@@ -107,7 +102,16 @@ export function Chat({ workspaceRoot, openFilePath, openFileContent }: {
         </div>
         <label className="model-select">
           <span>MODEL</span>
-          <select value={model} onChange={e => setModel(e.target.value)} disabled={streaming}>
+          <select value={model} onChange={async e => {
+            const next = e.target.value;
+            if (streaming) return;
+            try {
+              await invoke("switch_model", { model: next });
+              setModel(next);
+            } catch (error) {
+              window.alert(String(error));
+            }
+          }} disabled={streaming}>
             {models.map(m => <option key={m} value={m}>{m}</option>)}
           </select>
         </label>
