@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: infinitycoder-windows-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   LLAMA_CPP_TAG: b10982
 
